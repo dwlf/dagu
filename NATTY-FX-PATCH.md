@@ -6,6 +6,15 @@ tracks upstream unchanged.
 
 Upstream base: **v2.13.0**. Patch branch: **`natty-fx`**.
 
+Patched builds identify themselves. The Makefile feeds `git describe --tags`
+into `-X main.version`, so an annotated tag on this branch *is* the version
+marker: a build from `v2.13.0-nfx1` reports `v2.13.0-nfx1`, where brew's
+unpatched binary reports `2.13.0`. Re-tagging is a step in the bump procedure
+below — skip it and the next build silently reports a bare upstream version
+again, which is the one thing the marker exists to prevent. Nothing in the
+Makefile is patched to achieve this; the tag is the whole mechanism, so it
+adds no rebase surface.
+
 ## What the patch changes
 
 One file, `ui/src/features/views/viewColumns.ts`:
@@ -83,31 +92,56 @@ reachable through a locale layer.
 git fetch upstream --tags
 git rebase v<new-tag> natty-fx     # expect a conflict only if upstream
                                    # touches viewColumns.ts
+git tag -a v<new-tag>-nfx1 -m 'natty-fx patched build 1, on upstream v<new-tag>'
 cd ui && pnpm install && cd ..
 make ui && make bin
-cp .local/bin/dagu ~/.local/bin/dagu-nfx
 ```
 
+Tag **before** building: the version string is baked in at link time from
+`git describe --tags`, so a build that precedes the tag carries the old
+marker and has to be redone. Bump the `-nfxN` counter when re-patching the
+same upstream tag; the existing tag then moves with `git tag -d` and a fresh
+`git tag -a` at the new tip.
+
 Measured on an arm64 Mac: `pnpm install` ~35s, `make ui && make bin` ~90s.
+A full `make build` from cold, including the UI cache clean, ~4 min.
 
 Verify before pointing the service at it — the built binary should carry the
-patched strings, and the Cockpit page at `http://127.0.0.1:8477/cockpit`
-should read its columns left to right as
+patched strings and the new marker, and the Cockpit page at
+`http://127.0.0.1:8477/cockpit` should read its columns left to right as
 `SUBMITTED | QUEUED | RUNNING | LANDED | FAILED`:
 
 ```sh
 cd ui && pnpm vitest run src/features/cockpit/components/__tests__/KanbanBoard.test.tsx
-grep -ao 'review\]:"[A-Za-z]*"' ~/.local/bin/dagu-nfx | head -1
-grep -ao 'done\]:"[A-Za-z]*"' ~/.local/bin/dagu-nfx | head -1
+.local/bin/dagu version
+grep -ao 'review\]:"[A-Za-z]*"' .local/bin/dagu | head -1
+grep -ao 'done\]:"[A-Za-z]*"' .local/bin/dagu | head -1
 ```
 
-Both greps read from the binary the service is actually running, so they are
-the check to trust when the UI is not open — a source tree can be patched
-while `~/.local/bin/dagu-nfx` is still a pre-patch build.
+Then install and restart the service, which is what actually puts the new
+build in front of the operator:
 
-The Go build writes to `~/Library/Caches/go-build` and `~/go/pkg/mod`, both
-outside the agent sandbox's write allowlist, so it needs the sandbox
-disabled.
+```sh
+cp .local/bin/dagu ~/.local/bin/dagu-nfx.new
+mv ~/.local/bin/dagu-nfx.new ~/.local/bin/dagu-nfx
+launchctl kickstart -k gui/$(id -u)/us.dwlf.git-land-approve
+```
+
+Write-then-rename rather than `cp` straight onto the target: the service
+holds that path open, and a rename swaps it without writing through the
+running process's binary. The `kickstart` is not optional — without it the
+old process keeps serving from the file it already opened, so every check
+above passes while the board is unchanged.
+
+`~/.local/bin` is outside the agent sandbox's write allowlist, so the install
+needs the sandbox disabled. So does the Go build, which writes to
+`~/Library/Caches/go-build` and `~/go/pkg/mod`.
+
+Both greps read from the binary rather than the source tree, so they are the
+check to trust when the UI is not open — a source tree can be patched while
+`~/.local/bin/dagu-nfx` is still a pre-patch build. Run them against
+`~/.local/bin/dagu-nfx` after installing, too; the mtime is not evidence,
+since a build from a dirty tree predates the commit that captured it.
 
 ## How natty-fx consumes it
 
