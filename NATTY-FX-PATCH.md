@@ -4,12 +4,13 @@ This fork exists to carry one patch against upstream dagu, for the single
 instance that serves `git land-approve` in `~/p/natty-fx`. Everything else
 tracks upstream unchanged.
 
-Upstream base: **v2.13.0**. Patch branch: **`natty-fx`**.
+Upstream base: **v2.18.2** (rebased from v2.13.0 on 2026-10-04). Patch
+branch: **`natty-fx`**.
 
 Patched builds identify themselves. The Makefile feeds `git describe --tags`
 into `-X main.version`, so an annotated tag on this branch *is* the version
-marker: a build from `v2.13.0-nfx1` reports `v2.13.0-nfx1`, where brew's
-unpatched binary reports `2.13.0`. Re-tagging is a step in the bump procedure
+marker: a build from `v2.18.2-nfx1` reports `v2.18.2-nfx1`, where an
+unpatched build of the same release reports `2.18.2`. Re-tagging is a step in the bump procedure
 below — skip it and the next build silently reports a bare upstream version
 again, which is the one thing the marker exists to prevent. Nothing in the
 Makefile is patched to achieve this; the tag is the whole mechanism, so it
@@ -35,7 +36,7 @@ drops the reorder fails the test rather than shipping.
 
 ## Why a patch and not configuration
 
-Checked against v2.13.0 before forking:
+Checked against v2.13.0 before forking, and re-checked against v2.18.2:
 
 - `ViewSpec.columns` (the saved-view API) *does* control column order, and a
   saved view is enough if you only want the reorder — see the `Land` view on
@@ -44,9 +45,14 @@ Checked against v2.13.0 before forking:
 - `UIDef` (`internal/cmn/config/definition.go`) exposes only
   `log_encoding_charset`, `navbar_color`, `navbar_title`,
   `max_dashboard_page_limit` and `dags.sort_*`. No column labels.
-- There is no custom CSS or JS injection hook, and no locale layer
-  (`ui/src/locales` does not exist), so the strings are compiled into the
-  embedded bundle.
+- There is no custom CSS or JS injection hook, so the strings are compiled
+  into the embedded bundle.
+- v2.16 added an i18n layer (`ui/src/i18n/`, upstream `8615e3223`), but it is
+  not a way in. `translateStatic` returns the English source string unchanged
+  for `en` and looks other locales up in a built-in table keyed by that
+  string; there is no runtime or config override. The column headers are still
+  the `VIEW_COLUMN_LABELS` literals, so the patch still works. Under `ja` or
+  `zh`, `Submitted` and `Landed` have no table entry and render in English.
 
 ## What the patch deliberately does NOT change
 
@@ -56,7 +62,7 @@ decided scope rather than an unfinished pass (natty-fx `1a4fda3`).
 
 The easiest thing to be wrong about here: `git land-approve submit` prints a
 **run-detail** URL — `/dag-runs/git-land/<run-id>`, see
-`bin/git-land-approve:358` — not a Cockpit link. So the page an operator
+the `url=` line in `bin/git-land-approve` — not a Cockpit link. So the page an operator
 actually opens in order to approve a land is not the page this patch
 relabels. There, a waiting run reads `Waiting for manual action` and a landed
 one reads `succeeded`.
@@ -83,8 +89,9 @@ are not TSX literals:
   so that extension does not buy the thing it looks like it buys, which is
   why it was not taken.
 
-Verified against v2.13.0: `ui/src/locales` does not exist, so none of this is
-reachable through a locale layer.
+The i18n layer added in v2.16 does not change this: the `statusLabel` word is
+an API enum value, not a static UI string, and nothing in the translation
+table can be overridden at runtime.
 
 ## Rebuilding after an upstream bump
 
@@ -94,15 +101,15 @@ git rebase v<new-tag> natty-fx     # expect a conflict only if upstream
                                    # touches viewColumns.ts
 git tag -a v<new-tag>-nfx1 -m 'natty-fx patched build 1, on upstream v<new-tag>'
 cd ui && pnpm install && cd ..
-make ui && GOTOOLCHAIN=go1.26.5 make bin
+make ui && GOTOOLCHAIN=go$(sed -n 's/^go //p' go.mod) make bin
 ```
 
-Build with the Go version `go.mod` names, not whatever is newest. Measured
-2026-10-04: under brew's Go 1.27.1, `make bin` fails compiling the pinned
+Build with the Go version `go.mod` names, not whatever is newest; the
+`GOTOOLCHAIN` expression above reads it, and Go fetches that toolchain if it is
+not installed. Measured 2026-10-04 on the v2.13.0 base (`go 1.26.5`): under
+brew's Go 1.27.1, `make bin` failed compiling the pinned
 `github.com/go-json-experiment/json` (`undefined: json.SkipFunc`,
-`undefined: json.DiscardUnknownMembers`); with `GOTOOLCHAIN=go1.26.5` Go fetches
-that toolchain and the build succeeds. After an upstream bump, use the `go`
-line from the new `go.mod`. Likewise `ui/package.json` pins pnpm 10.13.1 in
+`undefined: json.DiscardUnknownMembers`) and succeeded under 1.26.5. Likewise `ui/package.json` pins pnpm 10.13.1 in
 `packageManager`; when the installed pnpm differs, run the pinned one
 (`npx -y pnpm@10.13.1`) rather than letting a newer major rewrite the lockfile.
 
