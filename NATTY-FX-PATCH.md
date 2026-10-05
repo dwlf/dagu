@@ -94,8 +94,17 @@ git rebase v<new-tag> natty-fx     # expect a conflict only if upstream
                                    # touches viewColumns.ts
 git tag -a v<new-tag>-nfx1 -m 'natty-fx patched build 1, on upstream v<new-tag>'
 cd ui && pnpm install && cd ..
-make ui && make bin
+make ui && GOTOOLCHAIN=go1.26.5 make bin
 ```
+
+Build with the Go version `go.mod` names, not whatever is newest. Measured
+2026-10-04: under brew's Go 1.27.1, `make bin` fails compiling the pinned
+`github.com/go-json-experiment/json` (`undefined: json.SkipFunc`,
+`undefined: json.DiscardUnknownMembers`); with `GOTOOLCHAIN=go1.26.5` Go fetches
+that toolchain and the build succeeds. After an upstream bump, use the `go`
+line from the new `go.mod`. Likewise `ui/package.json` pins pnpm 10.13.1 in
+`packageManager`; when the installed pnpm differs, run the pinned one
+(`npx -y pnpm@10.13.1`) rather than letting a newer major rewrite the lockfile.
 
 Tag **before** building: the version string is baked in at link time from
 `git describe --tags`, so a build that precedes the tag carries the old
@@ -145,8 +154,12 @@ since a build from a dirty tree predates the commit that captured it.
 
 ## How natty-fx consumes it
 
-`bin/git-land-approve` and `etc/launchagents/us.dwlf.git-land-approve.plist`
-resolve the binary through `DAGU_BIN`, defaulting to `dagu` on PATH. Setting
-`DAGU_BIN=$HOME/.local/bin/dagu-nfx` switches the service to this build;
-unsetting it reverts to brew's, with no other change. Brew's `dagu` is never
-shadowed.
+`bin/git-land-approve` runs only this build: it defaults to
+`~/.local/bin/dagu-nfx` and never consults `dagu` on PATH, so brew's dagu is
+not a fallback (natty-fx decision 2026-10-04, recorded as an amendment to its
+`design-research/0014`). The LaunchAgent and a shell `git land-approve submit`
+therefore run the same binary with no environment to set. `DAGU_BIN` still
+overrides the path. If the file is missing, `git land-approve` refuses and
+points back here rather than running anything else — so the install step above
+is what keeps the service working. PATH is still never shadowed: `dagu`
+elsewhere on the machine means whatever it meant before.
