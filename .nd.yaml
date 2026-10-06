@@ -2,3 +2,4 @@ version: "1"
 prefix: DAGU
 created_by: lll
 status_custom: ai_ready,check
+sync_auto: "off"
