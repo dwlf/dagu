@@ -1,13 +1,14 @@
 ---
 id: DAGU-epll
 title: "Dagu UI cannot have more than one browser window open"
-status: open
+status: in_progress
 priority: 2
 type: bug
 created_at: 2026-10-06T00:49:06Z
 created_by: lll
-updated_at: 2026-10-08T17:46:05Z
-content_hash: "sha256:da2e89d61d971d94ecc74bd879cd72f5d17ff70f50c221ea9843c7647a66bf34"
+updated_at: 2026-10-08T17:56:37Z
+content_hash: "sha256:71aed1277e9e9a9e60676182829611594c4a2fc3b816f89b1bcde12b5093fd37"
+assignee: lll
 ---
 
 ## Description
@@ -47,7 +48,8 @@ immediately, and the behaviour is upstream Dagu's, not the natty-fx patch's
 
 
 ## History
-
+- 2026-10-08T17:48:33Z status: open -> in_progress
+- 2026-10-08T17:48:33Z claimed by lll
 
 ## Links
 
@@ -105,3 +107,37 @@ Two independent parts:
 Upstream (dagucloud/dagu): no existing issue (searched EventSource, SSE
 tabs, connection limit, multiple tabs, visibility). Part 2 is a candidate
 contribution; CONTRIBUTING.md asks for an issue before the PR. Not filed.
+
+### 2026-10-08T17:48:33Z lll
+Claimed
+Worktree: /private/tmp/claude-501/-Users-lll-p/ed2912b8-5ecd-41dd-90b9-557328cfb3c3/scratchpad/dagu-sse
+Branch: feat/sse-close-hidden
+Base: 585a6f008d2af2795093465a0afdf3630b36eba2
+
+### 2026-10-08T17:49:55Z lll
+Claimed
+Worktree: /Users/lll/p/upkeep/dagu/.claude/worktrees/sse-close-hidden
+Branch: feat/sse-close-hidden
+Base: 585a6f008d2af2795093465a0afdf3630b36eba2
+
+### 2026-10-08T17:56:37Z lll
+Patch 2 written, built and deployed, 2026-10-08.
+
+- Branch feat/sse-close-hidden: c34a5c349 (SSEManager closes the stream
+  while the page is hidden, resumes with lastEventId when shown; 3 tests)
+  and f5887abc1 (NATTY-FX-PATCH.md documents patch 2 and the Node 25+ test
+  flag). Tagged v2.18.2-nfx2 at f5887abc1.
+- Tests: SSEManager + useSSE 19/19 and the documented KanbanBoard +
+  SSEManager command 16/16; the 3 new tests fail against the unpatched
+  SSEManager.ts. tsc, eslint and prettier clean on the changed files.
+- Built with go1.27.0 (go.mod) and pnpm 10.13.1. Binary reports
+  v2.18.2-nfx2; carries both patches (review/done labels, and
+  handleVisibilityChange x1).
+- Installed to ~/.local/bin/dagu-nfx 10:56 with the service restarted;
+  previous build kept at ~/.local/bin/dagu-nfx.v2.18.2-nfx1. The served
+  bundle is v2.18.2-nfx2 and contains the patch. The in-flight waiting run
+  3bfed2b survived the restart.
+
+Not yet done: natty-fx fast-forward and push of the branch and tag;
+browser-level check that background tabs release their connections; the
+upstream issue (drafted, not filed).
