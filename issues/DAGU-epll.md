@@ -6,8 +6,8 @@ priority: 2
 type: bug
 created_at: 2026-10-06T00:49:06Z
 created_by: lll
-updated_at: 2026-10-08T18:02:46Z
-content_hash: "sha256:bc5380566189a034c2b1a8cda331e6842e8c8491e80824b542c80ef15ca3a8d5"
+updated_at: 2026-10-08T18:16:56Z
+content_hash: "sha256:d02e49ca00a14245b8004c3c31d328bc53e3d358408c9bbdcb7235ae85c67166"
 assignee: lll
 closed_at: 2026-10-08T18:02:46Z
 close_reason: "Fixed on natty-fx f5887abc1 (tag v2.18.2-nfx2, pushed), deployed as ~/.local/bin/dagu-nfx 2026-10-08 10:56. Background tabs now close their SSE stream. Browser-level check (several background tabs, lsof shows <6 Chrome connections) not yet run; reopen if it fails. Upstream issue drafted, not filed."
@@ -144,3 +144,25 @@ Patch 2 written, built and deployed, 2026-10-08.
 Not yet done: natty-fx fast-forward and push of the branch and tag;
 browser-level check that background tabs release their connections; the
 upstream issue (drafted, not filed).
+
+### 2026-10-08T18:16:56Z lll
+Correction to patch 2, 2026-10-08 (v2.18.2-nfx3).
+
+The first version resumed a shown tab's stream with lastEventId. That is
+wrong: the server does not replay, it sends a snapshot only for topics that
+changed after lastEventId, and a topic retired while the tab was hidden
+(often the hidden tab was its only subscriber) is recreated with
+lastChangeEventID 0, so no snapshot is sent and the page stays stale until
+the topic next changes. Reproduced on the live server: lastEventId=25 after
+retirement gave no message in 4s; a fresh connection got its snapshot at
+once.
+
+Fix: fix/sse-fresh-resume 587f6b911 clears lastEventId on suspend, so the
+reopened stream gets fresh snapshots; the visibility test now asserts no
+lastEventId on the reopened URL and fails without the line. 505a3e5d6
+corrects NATTY-FX-PATCH.md. Tagged v2.18.2-nfx3, built, installed
+11:16; served bundle carries the fix. Previous build kept at
+~/.local/bin/dagu-nfx.v2.18.2-nfx2.
+
+The server-side retire behaviour is an upstream bug of its own (any
+reconnect after a topic retires); it is in the upstream issue draft.
