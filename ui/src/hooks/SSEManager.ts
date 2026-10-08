@@ -272,8 +272,7 @@ export class SSEManager {
   // A hidden tab holds no stream. Browsers cap HTTP/1.1 connections per host
   // (six in Chrome), and an open stream counts against that cap until its tab
   // closes, so a few background tabs leave a new tab unable to load at all.
-  // Subscriptions and lastEventId survive, and the stream resumes from there
-  // when the tab is shown again.
+  // Subscriptions survive, and the stream reopens when the tab is shown again.
   private handleVisibilityChange(): void {
     const hidden = isPageHidden();
     for (const conn of Array.from(this.connections.values())) {
@@ -304,6 +303,12 @@ export class SSEManager {
       conn.mutationTimeout = null;
     }
 
+    // Reopen without lastEventId so every topic gets a fresh snapshot. While
+    // the tab was hidden it may have been a topic's only subscriber; the
+    // server then retires the topic, and a recreated topic reports no change
+    // since any lastEventId, so a resumed stream would get no snapshot and the
+    // page would show stale data until that topic next changed.
+    conn.lastEventId = '';
     conn.sessionId = null;
     conn.serverTopics.clear();
     conn.pendingAdd.clear();

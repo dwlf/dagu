@@ -747,7 +747,7 @@ describe('SSEManager page visibility', () => {
     vi.unstubAllGlobals();
   });
 
-  it('closes the stream while hidden and resumes from the last event id', () => {
+  it('closes the stream while hidden and reopens it fresh when shown', () => {
     const topic = 'dag:visibility-resume.yaml';
     const manager = new SSEManager();
     const states: SSEConnectionState[] = [];
@@ -773,10 +773,13 @@ describe('SSEManager page visibility', () => {
     });
     expect(streamsFor(topic)).toHaveLength(1);
 
+    // A hidden tab may have been the topic's only subscriber, so the server
+    // can have retired it; resuming from lastEventId would then skip the
+    // snapshot. The reopened stream must ask for a fresh one.
     setVisibility('visible');
     const streams = streamsFor(topic);
     expect(streams).toHaveLength(2);
-    expect(streams[1]?.url).toContain('lastEventId=42');
+    expect(streams[1]?.url).not.toContain('lastEventId');
     expect(lastState(states)).toMatchObject({ isConnecting: true });
 
     unsubscribe();
