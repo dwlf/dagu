@@ -1,14 +1,16 @@
 ---
 id: DAGU-epll
 title: "Dagu UI cannot have more than one browser window open"
-status: in_progress
+status: closed
 priority: 2
 type: bug
 created_at: 2026-10-06T00:49:06Z
 created_by: lll
-updated_at: 2026-10-08T17:56:37Z
-content_hash: "sha256:71aed1277e9e9a9e60676182829611594c4a2fc3b816f89b1bcde12b5093fd37"
+updated_at: 2026-10-08T18:02:46Z
+content_hash: "sha256:bc5380566189a034c2b1a8cda331e6842e8c8491e80824b542c80ef15ca3a8d5"
 assignee: lll
+closed_at: 2026-10-08T18:02:46Z
+close_reason: "Fixed on natty-fx f5887abc1 (tag v2.18.2-nfx2, pushed), deployed as ~/.local/bin/dagu-nfx 2026-10-08 10:56. Background tabs now close their SSE stream. Browser-level check (several background tabs, lsof shows <6 Chrome connections) not yet run; reopen if it fails. Upstream issue drafted, not filed."
 ---
 
 ## Description
@@ -50,6 +52,7 @@ immediately, and the behaviour is upstream Dagu's, not the natty-fx patch's
 ## History
 - 2026-10-08T17:48:33Z status: open -> in_progress
 - 2026-10-08T17:48:33Z claimed by lll
+- 2026-10-08T18:02:46Z status: in_progress -> closed
 
 ## Links
 
