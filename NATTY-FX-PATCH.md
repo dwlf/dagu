@@ -1,8 +1,9 @@
 # natty-fx patch
 
-This fork exists to carry one patch against upstream dagu, for the single
-instance that serves `git land-approve` in `~/p/natty-fx`. Everything else
-tracks upstream unchanged.
+This fork exists to carry two small patches against upstream dagu, for the
+single instance that serves `git land-approve` in `~/p/natty-fx`: the Cockpit
+column order and labels, and closing the live-update stream in hidden tabs.
+Everything else tracks upstream unchanged.
 
 Upstream base: **v2.18.2** (rebased from v2.13.0 on 2026-10-04). Patch
 branch: **`natty-fx`**.
@@ -16,7 +17,7 @@ again, which is the one thing the marker exists to prevent. Nothing in the
 Makefile is patched to achieve this; the tag is the whole mechanism, so it
 adds no rebase surface.
 
-## What the patch changes
+## Patch 1: Cockpit column order and labels
 
 One file, `ui/src/features/views/viewColumns.ts`:
 
@@ -34,7 +35,27 @@ Done) describe a scheduler, not this workflow.
 both the labels and their left-to-right order, so a rebase that silently
 drops the reorder fails the test rather than shipping.
 
-## Why a patch and not configuration
+## Patch 2: close the live-update stream in hidden tabs
+
+One file, `ui/src/hooks/SSEManager.ts` (ai-overwatch DAGU-epll). Each Dagu
+tab holds one EventSource (`/api/v1/events/stream`) for as long as it is
+open, background tabs included. This instance is plain HTTP/1.1, where
+Chrome allows six connections per host, so six open tabs left the next one
+unable to load at all: its requests queued behind the held streams, never
+errored, and the polling fallback never started. `git land-approve` makes
+that easy to reach, because every submit hands the operator a new run page.
+
+The patch listens for `visibilitychange`. A hidden tab closes its streams
+and cancels pending reconnects, keeping subscriptions and `lastEventId`; a
+shown tab reconnects at once and the server replays from `lastEventId`.
+SWR does not poll hidden tabs, so a hidden tab makes no requests at all.
+
+It is an upstream candidate rather than a natty-fx preference: nothing in
+it is specific to this workflow. Drop it at the rebase that brings an
+upstream equivalent. `ui/src/hooks/__tests__/SSEManager.test.ts` ("page
+visibility") fails if the behaviour goes missing.
+
+## Why patch 1 is a patch and not configuration
 
 Checked against v2.13.0 before forking, and re-checked against v2.18.2:
 
@@ -54,7 +75,7 @@ Checked against v2.13.0 before forking, and re-checked against v2.18.2:
   the `VIEW_COLUMN_LABELS` literals, so the patch still works. Under `ja` or
   `zh`, `Submitted` and `Landed` have no table entry and render in English.
 
-## What the patch deliberately does NOT change
+## What patch 1 deliberately does NOT change
 
 The rename covers the Cockpit board's column headers and nothing else. Every
 other dagu view still reads upstream's generic vocabulary, and that is the
@@ -98,7 +119,7 @@ table can be overridden at runtime.
 ```sh
 git fetch upstream --tags
 git rebase v<new-tag> natty-fx     # expect a conflict only if upstream
-                                   # touches viewColumns.ts
+                                   # touches viewColumns.ts or SSEManager.ts
 git tag -a v<new-tag>-nfx1 -m 'natty-fx patched build 1, on upstream v<new-tag>'
 cd ui && pnpm install && cd ..
 make ui && GOTOOLCHAIN=go$(sed -n 's/^go //p' go.mod) make bin
@@ -128,11 +149,22 @@ patched strings and the new marker, and the Cockpit page at
 `SUBMITTED | QUEUED | RUNNING | LANDED | FAILED`:
 
 ```sh
-cd ui && pnpm vitest run src/features/cockpit/components/__tests__/KanbanBoard.test.tsx
+(cd ui && NODE_OPTIONS=--no-experimental-webstorage pnpm vitest run \
+  src/features/cockpit/components/__tests__/KanbanBoard.test.tsx \
+  src/hooks/__tests__/SSEManager.test.ts)
 .local/bin/dagu version
 grep -ao 'review\]:"[A-Za-z]*"' .local/bin/dagu | head -1
 grep -ao 'done\]:"[A-Za-z]*"' .local/bin/dagu | head -1
+grep -ac 'handleVisibilityChange' .local/bin/dagu
 ```
+
+`NODE_OPTIONS=--no-experimental-webstorage` is needed on Node 25 and later,
+whose built-in `localStorage` is undefined without `--localstorage-file` and
+shadows jsdom's, so every test touching storage fails with "Cannot read
+properties of undefined (reading 'getItem')". Measured on Node 26.10.0 only;
+drop the variable on a Node too old to know the flag. The last grep counts
+patch 2 in the embedded bundle
+(minifiers keep method names); it must be at least 1.
 
 Then install and restart the service, which is what actually puts the new
 build in front of the operator:
