@@ -714,3 +714,106 @@ describe('SSEManager', () => {
     unsubscribe();
   });
 });
+
+describe('SSEManager page visibility', () => {
+  function setVisibility(state: DocumentVisibilityState) {
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => state,
+    });
+    document.dispatchEvent(new Event('visibilitychange'));
+  }
+
+  // Managers from other tests stay registered for visibilitychange, so count
+  // only the streams that carry this test's topic.
+  function streamsFor(topic: string): MockEventSource[] {
+    return MockEventSource.instances.filter((instance) =>
+      new URL(instance.url, 'http://localhost').searchParams
+        .getAll('topic')
+        .includes(topic)
+    );
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    MockEventSource.instances = [];
+    vi.stubGlobal('EventSource', MockEventSource);
+    vi.stubGlobal('fetch', vi.fn());
+  });
+
+  afterEach(() => {
+    setVisibility('visible');
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it('closes the stream while hidden and resumes from the last event id', () => {
+    const topic = 'dag:visibility-resume.yaml';
+    const manager = new SSEManager();
+    const states: SSEConnectionState[] = [];
+    const unsubscribe = manager.subscribeTopic(topic, 'local', '/api/v1', {
+      onData: () => undefined,
+      onStateChange: (state) => states.push(snapshotState(state)),
+    });
+
+    const [first] = streamsFor(topic);
+    if (!first) {
+      throw new Error('expected EventSource instance');
+    }
+    first.emit('control', { sessionID: 'session-1', subscribed: [topic] });
+    first.emit('message', { topic, payload: { ok: true } }, '42');
+
+    setVisibility('hidden');
+    expect(first.close).toHaveBeenCalled();
+    expect(lastState(states)).toMatchObject({
+      isConnected: false,
+      isConnecting: false,
+      shouldUseFallback: false,
+      error: null,
+    });
+    expect(streamsFor(topic)).toHaveLength(1);
+
+    setVisibility('visible');
+    const streams = streamsFor(topic);
+    expect(streams).toHaveLength(2);
+    expect(streams[1]?.url).toContain('lastEventId=42');
+    expect(lastState(states)).toMatchObject({ isConnecting: true });
+
+    unsubscribe();
+  });
+
+  it('opens no stream for a subscription made while hidden until shown', () => {
+    const topic = 'dag:visibility-late.yaml';
+    setVisibility('hidden');
+    const manager = new SSEManager();
+    const unsubscribe = manager.subscribeTopic(topic, 'local', '/api/v1', {
+      onData: () => undefined,
+      onStateChange: () => undefined,
+    });
+    expect(streamsFor(topic)).toHaveLength(0);
+
+    setVisibility('visible');
+    expect(streamsFor(topic)).toHaveLength(1);
+
+    unsubscribe();
+  });
+
+  it('cancels a pending reconnect while hidden and reconnects at once when shown', async () => {
+    const topic = 'dag:visibility-retry.yaml';
+    const manager = new SSEManager();
+    const unsubscribe = manager.subscribeTopic(topic, 'local', '/api/v1', {
+      onData: () => undefined,
+      onStateChange: () => undefined,
+    });
+
+    streamsFor(topic)[0]?.onerror?.();
+    setVisibility('hidden');
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(streamsFor(topic)).toHaveLength(1);
+
+    setVisibility('visible');
+    expect(streamsFor(topic)).toHaveLength(2);
+
+    unsubscribe();
+  });
+});
