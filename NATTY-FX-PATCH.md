@@ -46,9 +46,19 @@ errored, and the polling fallback never started. `git land-approve` makes
 that easy to reach, because every submit hands the operator a new run page.
 
 The patch listens for `visibilitychange`. A hidden tab closes its streams
-and cancels pending reconnects, keeping subscriptions and `lastEventId`; a
-shown tab reconnects at once and the server replays from `lastEventId`.
-SWR does not poll hidden tabs, so a hidden tab makes no requests at all.
+and cancels pending reconnects, keeping its subscriptions; a shown tab
+reconnects at once and gets a fresh snapshot of every topic. SWR does not
+poll hidden tabs, so a hidden tab makes no requests at all.
+
+The reconnect deliberately drops `lastEventId`. The server does not replay
+missed events: on a reconnect it sends a snapshot only for topics that
+changed after `lastEventId`. A hidden tab is often a topic's only
+subscriber, so the server retires the topic, and the recreated topic
+reports no change since any id, so a resumed stream got no snapshot and the
+page stayed stale until the topic next changed. Measured on v2.18.2:
+`lastEventId=25` after retirement gave no message in 4s; a fresh connection
+got its snapshot at once. That server behaviour also affects ordinary
+reconnects after a network drop and is an upstream bug of its own.
 
 It is an upstream candidate rather than a natty-fx preference: nothing in
 it is specific to this workflow. Drop it at the rebase that brings an
