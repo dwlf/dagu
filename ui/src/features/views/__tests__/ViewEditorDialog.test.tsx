@@ -57,9 +57,9 @@ describe('ViewEditorDialog', () => {
         workspace: '',
         intervalDays: 1,
         columns: [
+          ViewColumn.review,
           ViewColumn.queued,
           ViewColumn.running,
-          ViewColumn.review,
           ViewColumn.done,
           ViewColumn.failed,
         ],
@@ -92,8 +92,8 @@ describe('ViewEditorDialog', () => {
       expect.objectContaining({
         columns: [
           ViewColumn.failed,
-          ViewColumn.running,
           ViewColumn.review,
+          ViewColumn.running,
           ViewColumn.done,
         ],
       })
@@ -113,8 +113,8 @@ describe('ViewEditorDialog', () => {
     expect(createView).toHaveBeenCalledWith(
       expect.objectContaining({
         columns: [
-          ViewColumn.running,
           ViewColumn.review,
+          ViewColumn.running,
           ViewColumn.done,
           ViewColumn.failed,
           ViewColumn.queued,

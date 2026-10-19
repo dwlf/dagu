@@ -240,6 +240,12 @@ function calculateRetryDelay(retryCount: number): number {
   return Math.min(1000 * 2 ** retryCount, MAX_RETRY_DELAY_MS);
 }
 
+function isPageHidden(): boolean {
+  return (
+    typeof document !== 'undefined' && document.visibilityState === 'hidden'
+  );
+}
+
 export class SSEManager {
   private connections = new Map<string, ManagedConnection>();
 
@@ -254,6 +260,65 @@ export class SSEManager {
           this.ensureConnected(conn);
         }
       }
+    });
+
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', () => {
+        this.handleVisibilityChange();
+      });
+    }
+  }
+
+  // A hidden tab holds no stream. Browsers cap HTTP/1.1 connections per host
+  // (six in Chrome), and an open stream counts against that cap until its tab
+  // closes, so a few background tabs leave a new tab unable to load at all.
+  // Subscriptions survive, and the stream reopens when the tab is shown again.
+  private handleVisibilityChange(): void {
+    const hidden = isPageHidden();
+    for (const conn of Array.from(this.connections.values())) {
+      if (hidden) {
+        this.suspend(conn);
+      } else {
+        conn.retryCount = 0;
+        this.ensureConnected(conn);
+      }
+    }
+  }
+
+  private suspend(conn: ManagedConnection): void {
+    if (conn.eventSource) {
+      conn.eventSource.close();
+      conn.eventSource = null;
+    }
+    if (conn.retryTimeout) {
+      clearTimeout(conn.retryTimeout);
+      conn.retryTimeout = null;
+    }
+    if (conn.connectTimeout) {
+      clearTimeout(conn.connectTimeout);
+      conn.connectTimeout = null;
+    }
+    if (conn.mutationTimeout) {
+      clearTimeout(conn.mutationTimeout);
+      conn.mutationTimeout = null;
+    }
+
+    // Reopen without lastEventId so every topic gets a fresh snapshot. While
+    // the tab was hidden it may have been a topic's only subscriber; the
+    // server then retires the topic, and a recreated topic reports no change
+    // since any lastEventId, so a resumed stream would get no snapshot and the
+    // page would show stale data until that topic next changed.
+    conn.lastEventId = '';
+    conn.sessionId = null;
+    conn.serverTopics.clear();
+    conn.pendingAdd.clear();
+    conn.pendingRemove.clear();
+
+    this.updateState(conn, {
+      isConnected: false,
+      isConnecting: false,
+      shouldUseFallback: false,
+      error: null,
     });
   }
 
@@ -421,7 +486,7 @@ export class SSEManager {
   }
 
   private ensureConnected(conn: ManagedConnection): void {
-    if (conn.topics.size === 0) {
+    if (conn.topics.size === 0 || isPageHidden()) {
       return;
     }
     if (conn.eventSource || conn.retryTimeout) {

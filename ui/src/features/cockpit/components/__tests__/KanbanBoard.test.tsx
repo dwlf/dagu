@@ -57,8 +57,19 @@ describe('KanbanBoard', () => {
         />
       );
 
-      for (const label of ['Queued', 'Running', 'Review', 'Done', 'Failed']) {
+      const labels = ['Submitted', 'Queued', 'Running', 'Landed', 'Failed'];
+      for (const label of labels) {
         expect(screen.getByText(label)).toBeInTheDocument();
+      }
+
+      // natty-fx patch: order is load-bearing, not cosmetic — a run starts in
+      // Submitted, so a rebase that restores upstream's order fails here.
+      const rendered = labels.map((label) => screen.getByText(label));
+      for (let i = 1; i < rendered.length; i += 1) {
+        expect(
+          rendered[i - 1]!.compareDocumentPosition(rendered[i]!) &
+            Node.DOCUMENT_POSITION_FOLLOWING
+        ).toBeTruthy();
       }
     }
   );

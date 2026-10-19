@@ -3,19 +3,24 @@
 
 import { ViewColumn } from '@/api/v1/schema';
 
+// natty-fx patch: this instance drives git-land approvals, where a run is
+// created by `git land-approve submit` and waits for the operator, so the
+// waiting column is the one a run STARTS in and belongs leftmost.
 export const DEFAULT_VIEW_COLUMNS: readonly ViewColumn[] = [
+  ViewColumn.review,
   ViewColumn.queued,
   ViewColumn.running,
-  ViewColumn.review,
   ViewColumn.done,
   ViewColumn.failed,
 ];
 
+// natty-fx patch: review/done renamed to the vocabulary of the one workflow
+// this fork serves — a run is submitted for approval, and succeeds by landing.
 export const VIEW_COLUMN_LABELS: Record<ViewColumn, string> = {
   [ViewColumn.queued]: 'Queued',
   [ViewColumn.running]: 'Running',
-  [ViewColumn.review]: 'Review',
-  [ViewColumn.done]: 'Done',
+  [ViewColumn.review]: 'Submitted',
+  [ViewColumn.done]: 'Landed',
   [ViewColumn.failed]: 'Failed',
 };
 
