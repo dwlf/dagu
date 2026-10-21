@@ -528,6 +528,9 @@ func NewServer(setup ServerConfig, opts ...ServerOption) (*Server, error) {
 	if stores.DAGSettings != nil {
 		apiOpts = append(apiOpts, apiv1.WithDAGSettingsStore(stores.DAGSettings))
 	}
+	if stores.DAGPins != nil {
+		apiOpts = append(apiOpts, apiv1.WithDAGPinStore(stores.DAGPins))
+	}
 
 	if stores.Wiki != nil {
 		apiOpts = append(apiOpts, apiv1.WithWikiStore(stores.Wiki))
@@ -872,11 +875,15 @@ func (srv *Server) Serve(ctx context.Context) error {
 	r.Use(middleware.Recoverer)
 	r.Use(securityHeadersMiddleware(srv.config.Server.TLS != nil))
 	r.Use(ipAccessPolicy.middleware)
-	r.Use(corsPolicy{
+	crossOriginPolicy := corsPolicy{
 		allowedOrigins: srv.config.Server.CORSAllowedOrigins,
 		publicURL:      srv.config.Server.PublicURL,
 		setupPath:      path.Join(apiV1BasePath, "auth/setup"),
-	}.middleware)
+	}
+	for _, warning := range crossOriginPolicy.originWarnings() {
+		logger.Warn(ctx, warning)
+	}
+	r.Use(crossOriginPolicy.middleware)
 	r.Use(middleware.RedirectSlashes)
 
 	if err := srv.setupRoutes(ctx, r); err != nil {
@@ -1136,7 +1143,7 @@ func (srv *Server) setupAssetRoutesWithFS(r *chi.Mux, basePath string, assetFS f
 			return
 		}
 
-		if ctype := mime.TypeByExtension(path.Ext(r.URL.Path)); ctype != "" {
+		if ctype := mime.TypeByExtension(strings.ToLower(path.Ext(r.URL.Path))); ctype != "" {
 			w.Header().Set("Content-Type", ctype)
 		}
 		fileServer.ServeHTTP(w, r)
@@ -1385,6 +1392,7 @@ func (srv *Server) registerDedicatedSSEFetchers(registrar *sse.Multiplexer) {
 	registrar.RegisterFetcher(sse.TopicTypeDAGRunLogs, srv.apiV1.GetDAGRunLogsData)
 	registrar.RegisterFetcher(sse.TopicTypeStepLog, srv.apiV1.GetStepLogData)
 	registrar.RegisterFetcher(sse.TopicTypeDAGRuns, srv.apiV1.GetDAGRunsListData)
+	registrar.RegisterValidator(sse.TopicTypeDAGRuns, srv.apiV1.ValidateDAGRunsListQuery)
 	registrar.RegisterFetcher(sse.TopicTypeQueues, srv.apiV1.GetQueuesListData)
 	registrar.RegisterFetcher(sse.TopicTypeDAGsList, srv.apiV1.GetDAGsListData)
 	for _, topicType := range []sse.TopicType{sse.TopicTypeWikiPage, sse.TopicTypeLegacyDoc} {

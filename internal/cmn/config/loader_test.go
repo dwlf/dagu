@@ -348,9 +348,10 @@ func TestLoad_Env(t *testing.T) {
 			HealthPort: 50101,
 		},
 		Worker: Worker{
-			ID:            "test-worker-123",
-			MaxActiveRuns: 200,
-			HealthPort:    50102,
+			ID:              "test-worker-123",
+			MaxActiveRuns:   200,
+			HealthPort:      50102,
+			ShutdownTimeout: 60 * time.Second,
 			PostgresPool: PostgresPoolConfig{
 				MaxOpenConns:    25,
 				MaxIdleConns:    5,
@@ -427,6 +428,55 @@ worker:
 
 	assert.Zero(t, cfg.Coordinator.HealthPort)
 	assert.Zero(t, cfg.Worker.HealthPort)
+}
+
+func TestLoad_WorkerShutdownTimeout(t *testing.T) {
+	t.Run("Default", func(t *testing.T) {
+		cfg := loadFromYAML(t, "# empty")
+		assert.Equal(t, 60*time.Second, cfg.Worker.ShutdownTimeout)
+	})
+
+	t.Run("FromYAML", func(t *testing.T) {
+		cfg := loadFromYAML(t, `
+worker:
+  shutdown_timeout: 5m
+`)
+		assert.Equal(t, 5*time.Minute, cfg.Worker.ShutdownTimeout)
+	})
+
+	t.Run("ZeroDisablesBound", func(t *testing.T) {
+		cfg := loadFromYAML(t, `
+worker:
+  shutdown_timeout: 0
+`)
+		assert.Zero(t, cfg.Worker.ShutdownTimeout)
+	})
+
+	t.Run("FromEnv", func(t *testing.T) {
+		cfg := loadWithEnv(t, "# empty", map[string]string{
+			"DAGU_WORKER_SHUTDOWN_TIMEOUT": "45s",
+		})
+		assert.Equal(t, 45*time.Second, cfg.Worker.ShutdownTimeout)
+	})
+
+	t.Run("InvalidFallsBackToDefault", func(t *testing.T) {
+		cfg := loadFromYAML(t, `
+worker:
+  shutdown_timeout: soon
+`)
+		assert.Equal(t, 60*time.Second, cfg.Worker.ShutdownTimeout)
+		require.NotEmpty(t, cfg.Warnings)
+		assert.Contains(t, cfg.Warnings[len(cfg.Warnings)-1], "Invalid worker.shutdown_timeout value: soon")
+	})
+
+	t.Run("NegativeIsRejected", func(t *testing.T) {
+		err := loadWithErrorFromYAML(t, `
+worker:
+  shutdown_timeout: -1s
+`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "worker.shutdown_timeout must be >= 0")
+	})
 }
 
 func TestLoad_WithAppHomeDir(t *testing.T) {
@@ -564,6 +614,66 @@ opencode:
 	cfg := testLoad(t, WithConfigFile(configFile))
 	require.Equal(t, "/usr/local/bin/opencode", cfg.OpenCode.Executable)
 	require.Equal(t, []string{"OPENAI_API_KEY"}, cfg.OpenCode.EnvPassthrough)
+}
+
+func TestLoad_LicenseServerName(t *testing.T) {
+	t.Run("YAML", func(t *testing.T) {
+		t.Setenv("DAGU_LICENSE_SERVER_NAME", "")
+		cfg := loadFromYAML(t, `
+license:
+  server_name: build-01
+`)
+		require.Equal(t, "build-01", cfg.License.ServerName)
+	})
+
+	t.Run("Env", func(t *testing.T) {
+		t.Setenv("DAGU_LICENSE_SERVER_NAME", "prod-eu-1")
+		require.Equal(t, "prod-eu-1", testLoad(t).License.ServerName)
+	})
+}
+
+func TestLoad_CloudReport(t *testing.T) {
+	t.Run("DefaultReportsNothing", func(t *testing.T) {
+		t.Setenv("DAGU_CLOUD_REPORT", "")
+		report := testLoad(t).Cloud.Report
+		require.Equal(t, ReportLevel(""), report)
+		require.False(t, report.Reports())
+	})
+
+	t.Run("YAML", func(t *testing.T) {
+		t.Setenv("DAGU_CLOUD_REPORT", "")
+		cfg := loadFromYAML(t, `
+cloud:
+  report: health
+`)
+		require.Equal(t, ReportHealth, cfg.Cloud.Report)
+		require.True(t, cfg.Cloud.Report.Reports())
+	})
+
+	t.Run("Runs", func(t *testing.T) {
+		t.Setenv("DAGU_CLOUD_REPORT", "runs")
+		report := testLoad(t).Cloud.Report
+		require.Equal(t, ReportRuns, report)
+		require.True(t, report.Reports())
+	})
+
+	t.Run("Env", func(t *testing.T) {
+		t.Setenv("DAGU_CLOUD_REPORT", "Health")
+		require.Equal(t, ReportHealth, testLoad(t).Cloud.Report)
+	})
+
+	t.Run("Off", func(t *testing.T) {
+		t.Setenv("DAGU_CLOUD_REPORT", "off")
+		require.False(t, testLoad(t).Cloud.Report.Reports())
+	})
+
+	t.Run("Invalid", func(t *testing.T) {
+		t.Setenv("DAGU_CLOUD_REPORT", "")
+		for _, value := range []string{"true", "all"} {
+			err := loadWithErrorFromYAML(t, "cloud:\n  report: "+value+"\n")
+			require.ErrorContains(t, err, "invalid cloud.report", value)
+		}
+	})
 }
 
 func TestLoad_OpenCodeConfigFromEnv(t *testing.T) {
@@ -855,9 +965,10 @@ scheduler:
 			HealthPort: 8091,
 		},
 		Worker: Worker{
-			ID:            "worker-1",
-			MaxActiveRuns: 50,
-			HealthPort:    8092,
+			ID:              "worker-1",
+			MaxActiveRuns:   50,
+			HealthPort:      8092,
+			ShutdownTimeout: 60 * time.Second,
 			Labels: map[string]string{
 				"env":    "production",
 				"region": "us-west-2",

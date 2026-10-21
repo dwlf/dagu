@@ -19,12 +19,13 @@ import (
 func Computer() *cobra.Command {
 	cmd := NewCommand(&cobra.Command{
 		Use:   "computer",
-		Short: "Check the desktop and manage state kept by computer steps",
+		Short: "Check the desktop, read its elements, and manage state kept by computer steps",
 	}, nil, func(ctx *Context, _ []string) error {
 		return ctx.Command.Help()
 	})
 
 	cmd.AddCommand(computerCheckCommand())
+	cmd.AddCommand(computerElementsCommand())
 	cmd.AddCommand(computerCacheCommand())
 	return cmd
 }
@@ -132,12 +133,19 @@ The cache is kept on the host that ran the step. In distributed mode, run
 this command on the worker.
 
 Examples:
-  dagu computer cache clear invoices                # Clear every step
-  dagu computer cache clear invoices --step post    # Clear one step
+  dagu computer cache clear invoices                   # Clear every step
+  dagu computer cache clear invoices --step post       # Clear one step
+  dagu computer cache clear invoices --step post --op 3  # Forget one task of the step
 `,
 		Args: cobra.ExactArgs(1),
-	}, []commandLineFlag{replayCacheStepFlag}, func(ctx *Context, args []string) error {
-		return clearReplayCache(ctx, args[0], namedReplayCache{kind: computerhost.AgentProvider, store: computerReplayCache(ctx)})
+	}, []commandLineFlag{replayCacheStepFlag, replayCacheOpFlag}, func(ctx *Context, args []string) error {
+		cache := namedReplayCache{kind: computerhost.AgentProvider, store: computerReplayCache(ctx)}
+		if op, err := ctx.StringParam(replayCacheOpFlag.name); err != nil {
+			return err
+		} else if op != "" {
+			return clearReplayCacheOp(ctx, args[0], cache, op)
+		}
+		return clearReplayCache(ctx, args[0], cache)
 	}))
 	return cmd
 }

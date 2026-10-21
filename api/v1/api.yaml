@@ -835,6 +835,8 @@ paths:
             Field to sort by:
             - `name`: Sort alphabetically by DAG name (case-insensitive)
             - `nextRun`: Sort by next scheduled run time. DAGs with earlier next run times appear first in ascending order. DAGs without schedules appear last.
+
+            Pinned DAGs are listed before all others; `sort` and `order` apply within the pinned and unpinned parts.
         - name: "order"
           in: "query"
           required: false
@@ -1014,6 +1016,9 @@ paths:
                   suspended:
                     type: boolean
                     description: "Whether the DAG is suspended"
+                  pinned:
+                    type: boolean
+                    description: "Whether the DAG is pinned to the top of the DAG list"
                   errors:
                     type: array
                     description: "List of errors encountered during the request"
@@ -1033,6 +1038,7 @@ paths:
                 required:
                   - latestDAGRun
                   - suspended
+                  - pinned
                   - localDags
                   - errors
         default:
@@ -3261,6 +3267,158 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /dag-runs/{name}/{dagRunId}/steps/{stepName}/foreach:
+    get:
+      summary: "List the items of a foreach step in a DAG-run"
+      description: |
+        Lists the items a foreach step expanded to, with the status each item's
+        body run reached. Items are sorted failed first, then running, then the
+        rest in index order. Nested foreach items are listed by passing the
+        parent path a body step reports as foreachParent.
+      operationId: "getDAGRunForeachItems"
+      tags:
+        - "dag-runs"
+      parameters:
+        - $ref: "#/components/parameters/RemoteNode"
+        - $ref: "#/components/parameters/DAGName"
+        - $ref: "#/components/parameters/DAGRunId"
+        - $ref: "#/components/parameters/StepName"
+        - $ref: "#/components/parameters/ForeachParent"
+        - $ref: "#/components/parameters/ForeachItemStatusFilter"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PerPage"
+      responses:
+        "200":
+          description: "A successful response"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForeachItemList"
+        "404":
+          description: "DAG-run or step not found"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          description: "Generic error response"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /dag-runs/{name}/{dagRunId}/steps/{stepName}/foreach/{item}:
+    get:
+      summary: "Retrieve one item of a foreach step in a DAG-run"
+      description: "Fetches an item's body run: its status and the status of each body step"
+      operationId: "getDAGRunForeachItem"
+      tags:
+        - "dag-runs"
+      parameters:
+        - $ref: "#/components/parameters/RemoteNode"
+        - $ref: "#/components/parameters/DAGName"
+        - $ref: "#/components/parameters/DAGRunId"
+        - $ref: "#/components/parameters/StepName"
+        - $ref: "#/components/parameters/ForeachItemPath"
+      responses:
+        "200":
+          description: "A successful response"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForeachItem"
+        "404":
+          description: "DAG-run, step, or item not found"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          description: "Generic error response"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /dag-runs/{name}/{dagRunId}/steps/{stepName}/foreach/{item}/steps/{bodyStepName}/log:
+    get:
+      summary: "Retrieve log for a body step of a foreach item in a DAG-run"
+      description: "Fetches the log of one body step run for one item of a foreach step"
+      operationId: "getDAGRunForeachStepLog"
+      tags:
+        - "dag-runs"
+      parameters:
+        - $ref: "#/components/parameters/RemoteNode"
+        - $ref: "#/components/parameters/DAGName"
+        - $ref: "#/components/parameters/DAGRunId"
+        - $ref: "#/components/parameters/StepName"
+        - $ref: "#/components/parameters/ForeachItemPath"
+        - $ref: "#/components/parameters/BodyStepName"
+        - $ref: "#/components/parameters/Tail"
+        - $ref: "#/components/parameters/Head"
+        - $ref: "#/components/parameters/Offset"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Stream"
+      responses:
+        "200":
+          description: "A successful response"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Log"
+        "404":
+          description: "Log file not found"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          description: "Generic error response"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /dag-runs/{name}/{dagRunId}/steps/{stepName}/foreach/{item}/steps/{bodyStepName}/log/download:
+    get:
+      summary: "Download log for a body step of a foreach item in a DAG-run"
+      description: "Downloads the entire log file of one body step run for one item of a foreach step"
+      operationId: "downloadDAGRunForeachStepLog"
+      tags:
+        - "dag-runs"
+      parameters:
+        - $ref: "#/components/parameters/RemoteNode"
+        - $ref: "#/components/parameters/DAGName"
+        - $ref: "#/components/parameters/DAGRunId"
+        - $ref: "#/components/parameters/StepName"
+        - $ref: "#/components/parameters/ForeachItemPath"
+        - $ref: "#/components/parameters/BodyStepName"
+        - $ref: "#/components/parameters/Stream"
+      responses:
+        "200":
+          description: "Log file content"
+          headers:
+            Content-Disposition:
+              schema:
+                type: "string"
+              description: "Attachment filename"
+          content:
+            text/plain:
+              schema:
+                type: "string"
+        "404":
+          description: "Log file not found"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          description: "Generic error response"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /dag-runs/{name}/{dagRunId}/steps/log/download:
     get:
       summary: "Download step logs as ZIP of a DAG-run"
@@ -3269,8 +3427,10 @@ paths:
         DAG-run only. Logs from nested DAG-runs are not included.
         Returns a streaming ZIP archive with no size limit. Each available log is
         stored as <index>-<step-name>/stdout.log or stderr.log, in run order.
-        Missing files are skipped. Each file includes only the bytes present when
-        it is opened; subsequent log growth is excluded.
+        The body logs and item records of a foreach step are stored under
+        <index>-<step-name>/foreach/. Missing files are skipped. Each file
+        includes only the bytes present when it is opened; subsequent log growth
+        is excluded.
       operationId: "downloadDAGRunStepLogs"
       tags:
         - "dag-runs"
@@ -4097,6 +4257,182 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /dag-runs/{name}/{dagRunId}/sub-dag-runs/{subDAGRunId}/steps/{stepName}/foreach:
+    get:
+      summary: "List the items of a foreach step in a sub DAG-run"
+      description: |
+        Lists the items a foreach step expanded to, with the status each item's
+        body run reached. Items are sorted failed first, then running, then the
+        rest in index order. Nested foreach items are listed by passing the
+        parent path a body step reports as foreachParent.
+      operationId: "getSubDAGRunForeachItems"
+      tags:
+        - "dag-runs"
+      parameters:
+        - $ref: "#/components/parameters/RemoteNode"
+        - $ref: "#/components/parameters/DAGName"
+        - $ref: "#/components/parameters/DAGRunId"
+        - name: "subDAGRunId"
+          in: "path"
+          required: true
+          schema:
+            type: "string"
+          description: "ID of the sub DAG-run"
+        - $ref: "#/components/parameters/StepName"
+        - $ref: "#/components/parameters/ForeachParent"
+        - $ref: "#/components/parameters/ForeachItemStatusFilter"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PerPage"
+      responses:
+        "200":
+          description: "A successful response"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForeachItemList"
+        "404":
+          description: "DAG-run or step not found"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          description: "Generic error response"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /dag-runs/{name}/{dagRunId}/sub-dag-runs/{subDAGRunId}/steps/{stepName}/foreach/{item}:
+    get:
+      summary: "Retrieve one item of a foreach step in a sub DAG-run"
+      description: "Fetches an item's body run: its status and the status of each body step"
+      operationId: "getSubDAGRunForeachItem"
+      tags:
+        - "dag-runs"
+      parameters:
+        - $ref: "#/components/parameters/RemoteNode"
+        - $ref: "#/components/parameters/DAGName"
+        - $ref: "#/components/parameters/DAGRunId"
+        - name: "subDAGRunId"
+          in: "path"
+          required: true
+          schema:
+            type: "string"
+          description: "ID of the sub DAG-run"
+        - $ref: "#/components/parameters/StepName"
+        - $ref: "#/components/parameters/ForeachItemPath"
+      responses:
+        "200":
+          description: "A successful response"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForeachItem"
+        "404":
+          description: "DAG-run, step, or item not found"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          description: "Generic error response"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /dag-runs/{name}/{dagRunId}/sub-dag-runs/{subDAGRunId}/steps/{stepName}/foreach/{item}/steps/{bodyStepName}/log:
+    get:
+      summary: "Retrieve log for a body step of a foreach item in a sub DAG-run"
+      description: "Fetches the log of one body step run for one item of a foreach step"
+      operationId: "getSubDAGRunForeachStepLog"
+      tags:
+        - "dag-runs"
+      parameters:
+        - $ref: "#/components/parameters/RemoteNode"
+        - $ref: "#/components/parameters/DAGName"
+        - $ref: "#/components/parameters/DAGRunId"
+        - name: "subDAGRunId"
+          in: "path"
+          required: true
+          schema:
+            type: "string"
+          description: "ID of the sub DAG-run"
+        - $ref: "#/components/parameters/StepName"
+        - $ref: "#/components/parameters/ForeachItemPath"
+        - $ref: "#/components/parameters/BodyStepName"
+        - $ref: "#/components/parameters/Tail"
+        - $ref: "#/components/parameters/Head"
+        - $ref: "#/components/parameters/Offset"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Stream"
+      responses:
+        "200":
+          description: "A successful response"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Log"
+        "404":
+          description: "Log file not found"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          description: "Generic error response"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /dag-runs/{name}/{dagRunId}/sub-dag-runs/{subDAGRunId}/steps/{stepName}/foreach/{item}/steps/{bodyStepName}/log/download:
+    get:
+      summary: "Download log for a body step of a foreach item in a sub DAG-run"
+      description: "Downloads the entire log file of one body step run for one item of a foreach step"
+      operationId: "downloadSubDAGRunForeachStepLog"
+      tags:
+        - "dag-runs"
+      parameters:
+        - $ref: "#/components/parameters/RemoteNode"
+        - $ref: "#/components/parameters/DAGName"
+        - $ref: "#/components/parameters/DAGRunId"
+        - name: "subDAGRunId"
+          in: "path"
+          required: true
+          schema:
+            type: "string"
+          description: "ID of the sub DAG-run"
+        - $ref: "#/components/parameters/StepName"
+        - $ref: "#/components/parameters/ForeachItemPath"
+        - $ref: "#/components/parameters/BodyStepName"
+        - $ref: "#/components/parameters/Stream"
+      responses:
+        "200":
+          description: "Log file content"
+          headers:
+            Content-Disposition:
+              schema:
+                type: "string"
+              description: "Attachment filename"
+          content:
+            text/plain:
+              schema:
+                type: "string"
+        "404":
+          description: "Log file not found"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          description: "Generic error response"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /dag-runs/{name}/{dagRunId}/sub-dag-runs/{subDAGRunId}/steps/log/download:
     get:
       summary: "Download step logs as ZIP of a sub DAG-run"
@@ -4105,8 +4441,10 @@ paths:
         sub DAG-run only. Logs from nested DAG-runs are not included.
         Returns a streaming ZIP archive with no size limit. Each available log is
         stored as <index>-<step-name>/stdout.log or stderr.log, in run order.
-        Missing files are skipped. Each file includes only the bytes present when
-        it is opened; subsequent log growth is excluded.
+        The body logs and item records of a foreach step are stored under
+        <index>-<step-name>/foreach/. Missing files are skipped. Each file
+        includes only the bytes present when it is opened; subsequent log growth
+        is excluded.
       operationId: "downloadSubDAGRunStepLogs"
       tags:
         - "dag-runs"
@@ -6512,6 +6850,69 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /dags/{fileName}/pin:
+    put:
+      summary: "Pin a DAG"
+      description: "Pins the DAG to the top of the DAG list for all users. Requires write access to the DAG's workspace; allowed when Git sync is read-only. Pinning an already pinned DAG succeeds."
+      operationId: "pinDAG"
+      tags:
+        - "dags"
+      parameters:
+        - $ref: "#/components/parameters/RemoteNode"
+        - $ref: "#/components/parameters/DAGFileName"
+      responses:
+        "204":
+          description: "DAG pinned"
+        "403":
+          description: "Forbidden - insufficient permissions"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: "DAG not found"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          description: "Unexpected error"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+    delete:
+      summary: "Unpin a DAG"
+      description: "Removes the DAG's pin for all users. Requires write access to the DAG's workspace; allowed when Git sync is read-only. Unpinning a DAG that is not pinned succeeds."
+      operationId: "unpinDAG"
+      tags:
+        - "dags"
+      parameters:
+        - $ref: "#/components/parameters/RemoteNode"
+        - $ref: "#/components/parameters/DAGFileName"
+      responses:
+        "204":
+          description: "DAG unpinned"
+        "403":
+          description: "Forbidden - insufficient permissions"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: "DAG not found"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          description: "Unexpected error"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /dags/{fileName}/notifications:
     get:
       summary: "Get DAG notification settings"
@@ -7881,7 +8282,7 @@ paths:
   /license/deactivate:
     post:
       summary: "Deactivate the current license"
-      description: "Removes local activation data and returns to community mode. Admin only."
+      description: "Frees the server's slot in Dagu Console, removes local activation data, and returns to community mode. Admin only."
       operationId: "deactivateLicense"
       tags:
         - "system"
@@ -7897,8 +8298,261 @@ paths:
                 properties:
                   message:
                     type: string
+                  releaseFailed:
+                    type: boolean
+                    description: "Dagu Console could not be told, so the server's slot stays in use until it is disconnected there"
         "400":
           description: "No active license or license configured via env var"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: "Insufficient permissions"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          description: "Unexpected error"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /license/connect:
+    post:
+      summary: "Connect this server to Dagu Console"
+      description: "Starts a request for a license from Dagu Console, or returns the pending one. Open connectUrl to approve it; the license is installed once a workspace owner approves. Admin only."
+      operationId: "startLicenseConnect"
+      tags:
+        - "system"
+      parameters:
+        - $ref: "#/components/parameters/RemoteNode"
+      responses:
+        "200":
+          description: "Current connection request"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LicenseConnectStatus"
+        "403":
+          description: "Insufficient permissions"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: "The license is set outside Dagu or the server already has an active license"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          description: "Unexpected error"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    get:
+      summary: "Get the Dagu Console connection request"
+      description: "Returns the state of the latest request to connect this server to Dagu Console. Admin only."
+      operationId: "getLicenseConnect"
+      tags:
+        - "system"
+      parameters:
+        - $ref: "#/components/parameters/RemoteNode"
+      responses:
+        "200":
+          description: "Current connection request"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LicenseConnectStatus"
+        "403":
+          description: "Insufficient permissions"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          description: "Unexpected error"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    delete:
+      summary: "Cancel the Dagu Console connection request"
+      description: "Abandons the pending request to connect this server to Dagu Console. Admin only."
+      operationId: "cancelLicenseConnect"
+      tags:
+        - "system"
+      parameters:
+        - $ref: "#/components/parameters/RemoteNode"
+      responses:
+        "200":
+          description: "Current connection request"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LicenseConnectStatus"
+        "403":
+          description: "Insufficient permissions"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          description: "Unexpected error"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /license/refresh:
+    post:
+      summary: "Check in with Dagu Console now"
+      description: "Refreshes the license from Dagu Console instead of waiting for the next hourly check-in. Admin only."
+      operationId: "refreshLicense"
+      tags:
+        - "system"
+      parameters:
+        - $ref: "#/components/parameters/RemoteNode"
+      responses:
+        "200":
+          description: "License status after the check-in"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LicenseStatusResponse"
+        "400":
+          description: "The license does not check in with Dagu Console"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: "Insufficient permissions"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "502":
+          description: "Dagu Console could not be reached"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          description: "Unexpected error"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /license/monitoring:
+    get:
+      summary: "Get what this server reports to Dagu Console"
+      description: "Returns how much this server reports to Dagu Console, whether configuration fixes it, and the last report sent. Admin only."
+      operationId: "getLicenseMonitoring"
+      tags:
+        - "system"
+      parameters:
+        - $ref: "#/components/parameters/RemoteNode"
+      responses:
+        "200":
+          description: "What this server reports"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LicenseMonitoring"
+        "400":
+          description: "License management is not available"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: "Insufficient permissions"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          description: "Unexpected error"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    put:
+      summary: "Choose what this server reports to Dagu Console"
+      description: "Sets how much this server reports to Dagu Console. The change applies at once; off stops a report in flight. Admin only."
+      operationId: "updateLicenseMonitoring"
+      tags:
+        - "system"
+      parameters:
+        - $ref: "#/components/parameters/RemoteNode"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - level
+              properties:
+                level:
+                  $ref: "#/components/schemas/LicenseMonitoringLevel"
+      responses:
+        "200":
+          description: "What this server reports after the change"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LicenseMonitoring"
+        "400":
+          description: "Unknown level, or license management is not available"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: "Insufficient permissions"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: "cloud.report in the configuration fixes the level"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          description: "Unexpected error"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /license/monitoring/dismiss-notice:
+    post:
+      summary: "Dismiss the notice that asks what to report"
+      description: "Stops asking administrators to choose what this server reports to Dagu Console. Admin only."
+      operationId: "dismissLicenseMonitoringNotice"
+      tags:
+        - "system"
+      parameters:
+        - $ref: "#/components/parameters/RemoteNode"
+      responses:
+        "200":
+          description: "What this server reports"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LicenseMonitoring"
+        "400":
+          description: "License management is not available"
           content:
             application/json:
               schema:
@@ -10537,6 +11191,45 @@ components:
       schema:
         type: string
 
+    ForeachItemPath:
+      name: item
+      in: path
+      description: |
+        Path of a foreach item: the item index, or for an item of a nested
+        foreach the parent path reported as foreachParent followed by a dot
+        and the item index, such as 2.inner.0.
+      required: true
+      schema:
+        type: string
+        pattern: "^[0-9]+(\\.[a-zA-Z0-9_-]+\\.[0-9]+)*$"
+
+    BodyStepName:
+      name: bodyStepName
+      in: path
+      description: name or ID of a body step of the foreach item
+      required: true
+      schema:
+        type: string
+
+    ForeachParent:
+      name: parent
+      in: query
+      description: |
+        Lists the items of a nested foreach instead of the step's own items.
+        The value is the foreachParent a body step reports, such as 2.inner.
+      required: false
+      schema:
+        type: string
+        pattern: "^[0-9]+\\.[a-zA-Z0-9_-]+(\\.[0-9]+\\.[a-zA-Z0-9_-]+)*$"
+
+    ForeachItemStatusFilter:
+      name: status
+      in: query
+      description: only list items whose body run reached this status
+      required: false
+      schema:
+        $ref: "#/components/schemas/ForeachItemStatusFilter"
+
     HumanTaskStepId:
       name: stepId
       in: path
@@ -13001,6 +13694,9 @@ components:
         suspended:
           type: boolean
           description: "Whether the DAG is suspended"
+        pinned:
+          type: boolean
+          description: "Whether the DAG is pinned to the top of the DAG list"
         errors:
           type: array
           description: "List of errors encountered during the request"
@@ -13011,6 +13707,7 @@ components:
         - dag
         - latestDAGRun
         - suspended
+        - pinned
         - errors
 
     DAG:
@@ -13452,7 +14149,6 @@ components:
           enum:
             - unknown_step_id
             - unknown_output_name
-            - missing_dependency
             - self_reference
             - namespace_unavailable
             - unknown_context_field
@@ -14449,6 +15145,20 @@ components:
           type: array
           items:
             type: string
+        position:
+          type: integer
+          description: "The operation's place in the step's list, from 1; absent for an event that is not one operation"
+        via:
+          type: string
+          description: "How an operation ran: screen for a replayed recording, model for a model request; absent for one that decides nothing"
+        durationMs:
+          type: integer
+          format: int64
+          description: "How long the operation took, in milliseconds; absent when under one"
+        tokens:
+          type: integer
+          format: int64
+          description: "Model tokens the operation used; absent when none"
       required:
         - sequence
         - id
@@ -14642,6 +15352,11 @@ components:
         depends:
           type: array
           description: "List of step names that must complete before this step can start"
+          items:
+            type: string
+        inferredDepends:
+          type: array
+          description: "Step names this step depends on because it references their outputs, in addition to depends"
           items:
             type: string
         repeatPolicy:
@@ -15171,6 +15886,156 @@ components:
           type: string
         error:
           type: string
+
+    ForeachItemStatusFilter:
+      type: string
+      description: "Status of a foreach item's body run"
+      enum:
+        - "not_started"
+        - "running"
+        - "succeeded"
+        - "failed"
+        - "aborted"
+
+    ForeachItemCounts:
+      type: object
+      description: "Number of items per body run status"
+      properties:
+        notStarted:
+          type: integer
+        running:
+          type: integer
+        succeeded:
+          type: integer
+        failed:
+          type: integer
+        aborted:
+          type: integer
+      required:
+        - notStarted
+        - running
+        - succeeded
+        - failed
+        - aborted
+
+    ForeachItemList:
+      type: object
+      description: "One page of a foreach step's items"
+      properties:
+        total:
+          type: integer
+          description: "Number of items the step expanded to, before any status filter"
+        counts:
+          $ref: "#/components/schemas/ForeachItemCounts"
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ForeachItemSummary"
+      required:
+        - total
+        - counts
+        - items
+
+    ForeachItemSummary:
+      type: object
+      description: "One item of a foreach step and the status its body run reached"
+      properties:
+        item:
+          type: string
+          description: "Path that addresses the item in the foreach item routes"
+        index:
+          type: integer
+        key:
+          type: string
+        status:
+          $ref: "#/components/schemas/NodeStatus"
+        statusLabel:
+          $ref: "#/components/schemas/NodeStatusLabel"
+        error:
+          type: string
+          description: "Error the body run reported, when it failed"
+        startedAt:
+          type: string
+          description: "RFC3339 timestamp when the body run started"
+        finishedAt:
+          type: string
+          description: "RFC3339 timestamp when the body run finished"
+      required:
+        - item
+        - index
+        - key
+        - status
+        - statusLabel
+
+    ForeachItem:
+      type: object
+      description: "One item of a foreach step with the status of each body step"
+      properties:
+        item:
+          type: string
+          description: "Path that addresses the item in the foreach item routes"
+        index:
+          type: integer
+        key:
+          type: string
+        status:
+          $ref: "#/components/schemas/NodeStatus"
+        statusLabel:
+          $ref: "#/components/schemas/NodeStatusLabel"
+        error:
+          type: string
+        startedAt:
+          type: string
+        finishedAt:
+          type: string
+        steps:
+          type: array
+          description: "Body steps in execution order"
+          items:
+            $ref: "#/components/schemas/ForeachBodyStep"
+      required:
+        - item
+        - index
+        - key
+        - status
+        - statusLabel
+        - steps
+
+    ForeachBodyStep:
+      type: object
+      description: "Status of one body step within a foreach item"
+      properties:
+        name:
+          type: string
+        id:
+          type: string
+        status:
+          $ref: "#/components/schemas/NodeStatus"
+        statusLabel:
+          $ref: "#/components/schemas/NodeStatusLabel"
+        error:
+          type: string
+        startedAt:
+          type: string
+        finishedAt:
+          type: string
+        retryCount:
+          type: integer
+        hasStdout:
+          type: boolean
+          description: "Whether a stdout log file was recorded for the step"
+        hasStderr:
+          type: boolean
+          description: "Whether a stderr log file was recorded for the step"
+        foreachParent:
+          type: string
+          description: "For a body step that is itself a foreach, the parent path that lists its items"
+      required:
+        - name
+        - status
+        - statusLabel
+        - hasStdout
+        - hasStderr
 
     Log:
       type: object
@@ -15710,6 +16575,28 @@ components:
         error:
           type: string
           description: "User-facing explanation when a configured license is unusable"
+        serverName:
+          type: string
+          description: "Name that identifies this server in Dagu Console"
+        licenseId:
+          type: string
+          description: "Identifier of the loaded license"
+        workspace:
+          type: string
+          description: "Dagu Console workspace that owns the license"
+        connectedVia:
+          type: string
+          enum: [console, key, env, config, file]
+          description: "How the license reached this server"
+        serverId:
+          type: string
+          description: "Identifier of this server in Dagu Console, for licenses that check in"
+        lastCheckIn:
+          type: string
+          description: "Last time Dagu Console accepted this server's check-in"
+        consoleUrl:
+          type: string
+          description: "Dagu Console page for this server"
       required:
         - valid
         - plan
@@ -15721,6 +16608,65 @@ components:
         - source
         - warningCode
         - error
+
+    LicenseConnectStatus:
+      type: object
+      description: "Request to connect this server to Dagu Console"
+      properties:
+        state:
+          type: string
+          enum: [idle, pending, granted, failed, expired]
+          description: "Progress of the request"
+        connectUrl:
+          type: string
+          description: "Dagu Console page that approves the request"
+        code:
+          type: string
+          description: "Short code Dagu Console shows so the approver can confirm the request"
+        expiresAt:
+          type: string
+          description: "When the request expires unless approved"
+        error:
+          type: string
+          description: "Why the request failed"
+      required:
+        - state
+
+    LicenseMonitoringLevel:
+      type: string
+      enum: ["off", "health", "runs"]
+      description: "How much this server reports to Dagu Console: off sends nothing, health sends its version and which services run, and runs also sends the status of finished DAG runs and the runs in progress"
+
+    LicenseMonitoring:
+      type: object
+      description: "What this server reports to Dagu Console"
+      properties:
+        level:
+          $ref: "#/components/schemas/LicenseMonitoringLevel"
+        configured:
+          type: boolean
+          description: "Whether cloud.report in the configuration fixes the level"
+        chosen:
+          type: boolean
+          description: "Whether an administrator chose the level on this server"
+        noticeDismissed:
+          type: boolean
+          description: "Whether an administrator dismissed the notice that asks what to report"
+        lastReportAt:
+          type: string
+          description: "When Dagu Console accepted the last report this server sent"
+        lastReport:
+          type: string
+          description: "JSON body of the last report, as sent, with heartbeat_secret replaced by \"[redacted]\""
+        runsPausedUntil:
+          type: string
+          format: date-time
+          description: "When Dagu Console stores this server's finished runs again, after its workspace reached the daily limit; absent when the last accepted report was not told of a pause"
+      required:
+        - level
+        - configured
+        - chosen
+        - noticeDismissed
 
     ChangePasswordRequest:
       type: object

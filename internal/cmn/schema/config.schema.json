@@ -251,6 +251,9 @@
     },
     "license": {
       "$ref": "#/definitions/LicenseDef"
+    },
+    "cloud": {
+      "$ref": "#/definitions/CloudDef"
     }
   },
   "definitions": {
@@ -970,7 +973,7 @@
       "properties": {
         "log_encoding_charset": {
           "type": "string",
-          "description": "Character encoding for log display."
+          "description": "Character encoding for log lines that are not valid UTF-8."
         },
         "navbar_color": {
           "type": "string",
@@ -1161,6 +1164,10 @@
           "description": "Worker HTTP health check port. Default: 8092. Set to 0 to disable.",
           "minimum": 0,
           "maximum": 65535
+        },
+        "shutdown_timeout": {
+          "type": "string",
+          "description": "How long a worker stopping on SIGINT or SIGTERM drains running DAG runs before it cancels them. Default: '60s'. Set to '0' to wait without a bound. Set the supervisor's stop timeout at least 15s above this value (systemd TimeoutStopSec defaults to 90s, docker stop to 10s, Kubernetes terminationGracePeriodSeconds to 30s)."
         },
         "labels": {
           "oneOf": [
@@ -1624,6 +1631,23 @@
         "cloud_url": {
           "type": "string",
           "description": "License service URL."
+        },
+        "server_name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Name that identifies this server in Dagu Console. Default: the hostname."
+        }
+      }
+    },
+    "CloudDef": {
+      "type": "object",
+      "description": "What a server with an online license shares with Dagu Console.",
+      "additionalProperties": false,
+      "properties": {
+        "report": {
+          "type": "string",
+          "enum": ["off", "health", "runs"],
+          "description": "What this server reports to Dagu Console beyond its license check-in. off (default) reports nothing; health reports the Dagu version, OS, architecture, start time, and how many schedulers and coordinators run; runs also reports each reportable status change of a top-level DAG run (events without a valid status snapshot, or with names or IDs longer than Dagu Console keeps, are left out): DAG name, run and attempt IDs, status, times, and up to 50 failed step names. Logs, outputs, parameters, commands, error messages, DAG files, and the values of workflow secrets are never sent. Every report also carries the license and server IDs and the heartbeat secret, as the license check-in does."
         }
       }
     }

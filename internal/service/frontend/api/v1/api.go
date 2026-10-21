@@ -18,10 +18,12 @@ import (
 	"github.com/dagucloud/dagu/v2/api/v1"
 	"github.com/dagucloud/dagu/v2/internal/audit"
 	"github.com/dagucloud/dagu/v2/internal/auth"
+	"github.com/dagucloud/dagu/v2/internal/cloudreport"
 	"github.com/dagucloud/dagu/v2/internal/cmn/config"
 	"github.com/dagucloud/dagu/v2/internal/cmn/logger"
 	"github.com/dagucloud/dagu/v2/internal/cmn/logger/tag"
 	cmnvalue "github.com/dagucloud/dagu/v2/internal/cmn/value"
+	"github.com/dagucloud/dagu/v2/internal/dagpin"
 	"github.com/dagucloud/dagu/v2/internal/dagrun"
 	"github.com/dagucloud/dagu/v2/internal/dagsettings"
 	"github.com/dagucloud/dagu/v2/internal/dispatch"
@@ -93,12 +95,14 @@ type API struct {
 	dagWritesDisabled    bool // True when git sync read-only mode is active
 	baseConfigStore      dagsettings.BaseConfigStore
 	dagSettingsStore     dagsettings.Store
+	dagPinStore          dagpin.Store
 	wikiStore            wiki.PageStore
 	workspaceWikiMu      sync.RWMutex
 	secretStore          secretpkg.Store
 	profileStore         profilepkg.Store
 	viewStore            view.Store
 	licenseManager       *license.Manager
+	cloudReport          CloudReportService
 	apiKeyCreateMu       sync.Mutex
 	workspaceStore       workspace.Store
 	leaseStaleThreshold  time.Duration
@@ -145,6 +149,14 @@ type IncidentService interface {
 	SavePolicySet(ctx context.Context, policySet *incidentmodel.PolicySet, updatedBy string) (*incidentmodel.PolicySet, error)
 	DeletePolicySet(ctx context.Context, scope incidentmodel.PolicyScope, workspaceName, dagName string) error
 	SendProviderTest(ctx context.Context, providerID string) (*incidentservice.TestResult, error)
+}
+
+// CloudReportService lets administrators see and choose what the server
+// reports to Dagu Console.
+type CloudReportService interface {
+	Status(ctx context.Context) (cloudreport.Status, error)
+	SetLevel(ctx context.Context, level config.ReportLevel) error
+	DismissNotice(ctx context.Context) error
 }
 
 // AuthService defines the interface for authentication operations.
@@ -281,6 +293,13 @@ func WithDAGSettingsStore(store dagsettings.Store) APIOption {
 	}
 }
 
+// WithDAGPinStore returns an APIOption that sets the store of pinned DAGs.
+func WithDAGPinStore(store dagpin.Store) APIOption {
+	return func(a *API) {
+		a.dagPinStore = store
+	}
+}
+
 // WithWikiStore returns an APIOption that sets the API's Wiki page store.
 func WithWikiStore(store wiki.PageStore) APIOption {
 	return func(a *API) {
@@ -292,6 +311,13 @@ func WithWikiStore(store wiki.PageStore) APIOption {
 func WithLicenseManager(m *license.Manager) APIOption {
 	return func(a *API) {
 		a.licenseManager = m
+	}
+}
+
+// WithCloudReport sets what the server reports to Dagu Console.
+func WithCloudReport(s CloudReportService) APIOption {
+	return func(a *API) {
+		a.cloudReport = s
 	}
 }
 
@@ -484,6 +510,7 @@ func (a *API) ConfigureRoutes(ctx context.Context, r chi.Router, writeTimeout ti
 		r.Use(frontendauth.Middleware(authOptions))
 		r.Use(a.restAuditSubjectMiddleware())
 		r.Use(a.syncProxyAuthorization(mountedAPIPath))
+		r.Use(a.licenseProxyAuthorization(mountedAPIPath))
 		r.Use(humanTaskInputMiddleware(mountedAPIPath))
 		if a.config.Server.StrictValidation {
 			r.Use(a.createValidatorMiddleware(swagger))

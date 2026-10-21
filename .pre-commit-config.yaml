@@ -1,0 +1,10 @@
+repos:
+  - repo: local
+    hooks:
+      - id: go-check
+        name: Go formatting and lint (declared toolchain)
+        entry: >-
+          sh -c 'GOTOOLCHAIN=go$(sed -n "s/^go //p" go.mod) exec make check'
+        language: system
+        files: '(^.*\.go$|^go\.(mod|sum)$|^Makefile$|^\.golangci\..*$|^\.pre-commit-config\.yaml$)'
+        pass_filenames: false

@@ -41,6 +41,7 @@ type Config struct {
 	GitSync         GitSyncConfig
 	Tunnel          TunnelConfig
 	License         LicenseConfig
+	Cloud           CloudConfig
 	Notices         []string
 	Warnings        []string
 }
@@ -133,6 +134,35 @@ const TunnelProviderTailscale = "tailscale"
 type LicenseConfig struct {
 	Key      string
 	CloudURL string
+	// ServerName identifies this server in Dagu Console. Empty means the
+	// hostname.
+	ServerName string
+}
+
+// CloudConfig holds what a server with an online license shares with Dagu
+// Console.
+type CloudConfig struct {
+	// Report is how much the server reports to Dagu Console. Empty means it
+	// is not set, and the server reports nothing.
+	Report ReportLevel
+}
+
+// ReportLevel is how much a server reports to Dagu Console, beyond the
+// license check-in every licensed server makes.
+type ReportLevel string
+
+const (
+	// ReportOff reports nothing.
+	ReportOff ReportLevel = "off"
+	// ReportHealth reports the server's version and which services run.
+	ReportHealth ReportLevel = "health"
+	// ReportRuns also reports DAG-run status changes.
+	ReportRuns ReportLevel = "runs"
+)
+
+// Reports reports whether the level sends anything.
+func (l ReportLevel) Reports() bool {
+	return l == ReportHealth || l == ReportRuns
 }
 
 // ExecutionMode represents the default execution mode for DAGs.
@@ -576,7 +606,10 @@ type Worker struct {
 	Labels        map[string]string // Capability matching labels
 	Coordinators  []string          // Static discovery addresses (host:port)
 	HealthPort    int               // HTTP health check port (default: 8092, 0 disables)
-	PostgresPool  PostgresPoolConfig
+	// ShutdownTimeout bounds how long a stopping worker drains running DAG
+	// runs before it cancels them. Default: 60s; 0 waits without a bound.
+	ShutdownTimeout time.Duration
+	PostgresPool    PostgresPoolConfig
 }
 
 // Proc represents local proc-file heartbeat configuration.
@@ -653,6 +686,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := c.validateExecutionMode(); err != nil {
+		return err
+	}
+	if err := c.validateCloudReport(); err != nil {
 		return err
 	}
 	if err := c.validateGitSync(); err != nil {
@@ -754,6 +790,9 @@ func (c *Config) validateCoordinator() error {
 func (c *Config) validateWorker() error {
 	if c.Worker.HealthPort < 0 || c.Worker.HealthPort > 65535 {
 		return fmt.Errorf("invalid worker.health_port: %d", c.Worker.HealthPort)
+	}
+	if c.Worker.ShutdownTimeout < 0 {
+		return fmt.Errorf("worker.shutdown_timeout must be >= 0")
 	}
 	return nil
 }
@@ -1209,6 +1248,16 @@ func (c *Config) validateExecutionMode() error {
 		return nil
 	default:
 		return fmt.Errorf("invalid default_execution_mode: %q (must be one of: local, distributed)", c.DefaultExecMode)
+	}
+}
+
+// validateCloudReport validates what the server reports to Dagu Console.
+func (c *Config) validateCloudReport() error {
+	switch c.Cloud.Report {
+	case "", ReportOff, ReportHealth, ReportRuns:
+		return nil
+	default:
+		return fmt.Errorf("invalid cloud.report: %q (must be one of: off, health, runs)", c.Cloud.Report)
 	}
 }
 

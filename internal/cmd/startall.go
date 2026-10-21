@@ -176,8 +176,14 @@ func runStartAll(ctx *Context, _ []string) error {
 	// Initialize resource monitoring service
 	resourceService := resource.NewService(ctx.Config)
 
+	serverOpts := []frontend.ServerOption{frontend.WithAPIOption(apiv1.WithOpenCodeHost(openCodeHost))}
+	cloudMonitoring := newCloudReportMonitoring(serviceCtx)
+	if cloudMonitoring != nil {
+		serverOpts = append(serverOpts, frontend.WithAPIOption(apiv1.WithCloudReport(cloudMonitoring)))
+	}
+
 	// Use serviceCtx so auth initialization can respond to termination signals
-	server, err := newServer(serviceCtx, resourceService, stores, frontend.WithAPIOption(apiv1.WithOpenCodeHost(openCodeHost)))
+	server, err := newServer(serviceCtx, resourceService, stores, serverOpts...)
 	if err != nil {
 		return fmt.Errorf("failed to initialize server: %w", err)
 	}
@@ -203,6 +209,10 @@ func runStartAll(ctx *Context, _ []string) error {
 	// Start resource monitoring service (starts its own goroutine internally)
 	if err := resourceService.Start(serviceCtx); err != nil {
 		return fmt.Errorf("failed to start resource service: %w", err)
+	}
+
+	if cloudReporter := startCloudReport(serviceCtx, cloudMonitoring); cloudReporter != nil {
+		defer cloudReporter.Stop()
 	}
 
 	// WaitGroup to track all services

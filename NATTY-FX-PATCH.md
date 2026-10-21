@@ -5,17 +5,15 @@ single instance that serves `git land-approve` in `~/p/natty-fx`: the Cockpit
 column order and labels, and closing the live-update stream in hidden tabs.
 Everything else tracks upstream unchanged.
 
-Upstream base: **v2.18.2** (rebased from v2.13.0 on 2026-10-04). Patch
-branch: **`natty-fx`**.
+Upstream base: **v2.19.0**, exact commit
+`2493ea5c5b6dc036a09ba38de704ec9a47589527`. Upgrade candidate branch:
+**`feat/dagu-v2.19.0-nfx`**. Both patches remain necessary: upstream has neither
+these Cockpit labels/order nor visibility handling in `SSEManager`.
 
-Patched builds identify themselves. The Makefile feeds `git describe --tags`
-into `-X main.version`, so an annotated tag on this branch *is* the version
-marker: a build from `v2.18.2-nfx1` reports `v2.18.2-nfx1`, where an
-unpatched build of the same release reports `2.18.2`. Re-tagging is a step in the bump procedure
-below — skip it and the next build silently reports a bare upstream version
-again, which is the one thing the marker exists to prevent. Nothing in the
-Makefile is patched to achieve this; the tag is the whole mechanism, so it
-adds no rebase surface.
+Patched builds identify themselves with **v2.19.0-nfx1**. Pass
+`BUILD_VERSION=v2.19.0-nfx1` to `make bin`; its existing linker setting embeds
+that value. This candidate does not rewrite existing tags or the shared
+`natty-fx` branch. The default Makefile value still comes from `git describe`.
 
 ## Patch 1: Cockpit column order and labels
 
@@ -37,7 +35,7 @@ drops the reorder fails the test rather than shipping.
 
 ## Patch 2: close the live-update stream in hidden tabs
 
-One file, `ui/src/hooks/SSEManager.ts` (ai-overwatch DAGU-epll). Each Dagu
+One file, `ui/src/hooks/SSEManager.ts` (hidden-tab stream fix). Each Dagu
 tab holds one EventSource (`/api/v1/events/stream`) for as long as it is
 open, background tabs included. This instance is plain HTTP/1.1, where
 Chrome allows six connections per host, so six open tabs left the next one
@@ -67,7 +65,7 @@ visibility") fails if the behaviour goes missing.
 
 ## Why patch 1 is a patch and not configuration
 
-Checked against v2.13.0 before forking, and re-checked against v2.18.2:
+Checked against v2.13.0 before forking, and re-checked against v2.19.0:
 
 - `ViewSpec.columns` (the saved-view API) *does* control column order, and a
   saved view is enough if you only want the reorder — see the `Land` view on
@@ -89,7 +87,7 @@ Checked against v2.13.0 before forking, and re-checked against v2.18.2:
 
 The rename covers the Cockpit board's column headers and nothing else. Every
 other dagu view still reads upstream's generic vocabulary, and that is the
-decided scope rather than an unfinished pass (natty-fx `1a4fda3`).
+decided scope rather than an unfinished pass (the existing fork scope).
 
 The easiest thing to be wrong about here: `git land-approve submit` prints a
 **run-detail** URL — `/dag-runs/git-land/<run-id>`, see
@@ -126,36 +124,40 @@ table can be overridden at runtime.
 
 ## Rebuilding after an upstream bump
 
+Prepare each upgrade on an isolated non-main branch based on the exact release.
+Carry the two behavior files, their regression tests and this guide; inspect
+upstream first and remove a patch only when its equivalent exists there.
+Never rewrite shared branches or existing tags.
+
+The v2.19.0 release declares **Go 1.27.0** in `go.mod` and
+**pnpm 10.13.1** (including its integrity pin) in `ui/package.json`.
+Use those versions so the lockfile and Go dependencies keep their declared
+build environment. The following commands prepare this candidate's embedded
+UI and distinctly marked binary:
+
 ```sh
-git fetch upstream --tags
-git rebase v<new-tag> natty-fx     # expect a conflict only if upstream
-                                   # touches viewColumns.ts or SSEManager.ts
-git tag -a v<new-tag>-nfx1 -m 'natty-fx patched build 1, on upstream v<new-tag>'
-cd ui && pnpm install && cd ..
-make ui && GOTOOLCHAIN=go$(sed -n 's/^go //p' go.mod) make bin
+(cd ui && npx --yes pnpm@10.13.1 install --frozen-lockfile --ignore-scripts)
+(cd ui && npx --yes pnpm@10.13.1 build)
+make cp-assets
+GOTOOLCHAIN=go1.27.0 make bin BUILD_VERSION=v2.19.0-nfx1
 ```
 
-Build with the Go version `go.mod` names, not whatever is newest; the
-`GOTOOLCHAIN` expression above reads it, and Go fetches that toolchain if it is
-not installed. Measured 2026-10-04 on the v2.13.0 base (`go 1.26.5`): under
-brew's Go 1.27.1, `make bin` failed compiling the pinned
-`github.com/go-json-experiment/json` (`undefined: json.SkipFunc`,
-`undefined: json.DiscardUnknownMembers`) and succeeded under 1.26.5. Likewise `ui/package.json` pins pnpm 10.13.1 in
-`packageManager`; when the installed pnpm differs, run the pinned one
-(`npx -y pnpm@10.13.1`) rather than letting a newer major rewrite the lockfile.
+Run the focused regressions against unpatched release behavior first, then
+against both carried patches. The saved-view editor tests also assert the
+Submitted-first default order when creating or restoring columns. Keep the failing and passing output with the
+candidate's build and isolated-browser evidence under `.local/artifacts/`.
+Use a separate runtime directory and unused loopback port. Verify Cockpit
+labels/order and that hiding a tab closes its stream; after another client
+changes its subscribed data, showing it must immediately receive the current
+snapshot without `lastEventId`. Candidate preparation does not install the
+binary, restart services or alter live runtime data.
 
-Tag **before** building: the version string is baked in at link time from
-`git describe --tags`, so a build that precedes the tag carries the old
-marker and has to be redone. Bump the `-nfxN` counter when re-patching the
-same upstream tag; the existing tag then moves with `git tag -d` and a fresh
-`git tag -a` at the new tip.
-
-Measured on an arm64 Mac: `pnpm install` ~35s, `make ui && make bin` ~90s.
-A full `make build` from cold, including the UI cache clean, ~4 min.
+Earlier arm64 Mac measurements: dependency installation ~35s, UI and binary
+builds ~90s; a cold full build ~4 min. Candidate timing varies with cache state.
 
 Verify before pointing the service at it — the built binary should carry the
 patched strings and the new marker, and the Cockpit page at
-`http://127.0.0.1:8477/cockpit` should read its columns left to right as
+`http://127.0.0.1:32919/cockpit` should read its columns left to right as
 `SUBMITTED | QUEUED | RUNNING | LANDED | FAILED`:
 
 ```sh

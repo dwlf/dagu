@@ -19,6 +19,12 @@ Dagu is a local-first workflow engine for operations and internal automation. It
 
 Dagu turns existing scripts and runbooks into production workflows with scheduling, retries, human tasks, and run history. It runs where your data and credentials live: on-prem, air-gapped, edge, or cloud, and scales from a single node to a fleet of workers.
 
+This fork's v2.19.0 candidate carries the natty-fx Cockpit columns
+(Submitted, Queued, Running, Landed, Failed) and closes live-update streams in
+hidden tabs, reconnecting with fresh snapshots when shown. See
+[NATTY-FX-PATCH.md](NATTY-FX-PATCH.md) for the exact upstream base, pinned build
+commands, isolated verification and separate installation procedure.
+
 **Highlights:**
 
 - Single binary installation.
@@ -609,6 +615,7 @@ Dagu includes built-in actions that run within the Dagu process or on the select
 | `state.get` / `state.set` / `state.delete` / `state.list` / `state.diff` | Persistent JSON state across DAG runs |
 | `data.convert` / `data.pick` | Convert and select structured data |
 | `jq.filter` | JSON transformation using jq expressions |
+| `js.run` | JavaScript transforms in an embedded sandbox, no Node.js needed |
 | `archive.create` / `archive.extract` / `archive.list` | Create, extract, and list zip/tar archives |
 | `wait.duration` / `wait.until` / `wait.file` / `wait.http` | Wait for time, file state, or HTTP readiness |
 | `human.task` | Wait for acknowledgement or typed operator input before downstream steps continue |
@@ -981,6 +988,7 @@ OIDC variables: `DAGU_AUTH_OIDC_CLIENT_ID`, `DAGU_AUTH_OIDC_CLIENT_SECRET`, `DAG
 | `DAGU_WORKER_ID` | - | Worker instance ID |
 | `DAGU_WORKER_MAX_ACTIVE_RUNS` | `100` | Max concurrent runs per worker |
 | `DAGU_WORKER_HEALTH_PORT` | `8092` | Worker health check port |
+| `DAGU_WORKER_SHUTDOWN_TIMEOUT` | `60s` | How long a worker stopping on `SIGINT`/`SIGTERM` drains running DAG runs before it cancels them (`0` waits without a bound). Set the supervisor's stop timeout at least `15s` above it: systemd `TimeoutStopSec` defaults to `90s`, `docker stop` to `10s`, Kubernetes `terminationGracePeriodSeconds` to `30s` |
 | `DAGU_WORKER_LABELS` | - | Worker labels (`key=value,key=value`); `os` and `arch` are built in and cannot be overridden |
 | `DAGU_COORDINATOR_ADVERTISE` | auto-detected hostname | Address advertised in the service registry |
 | `DAGU_WORKER_COORDINATORS` | - | Coordinator addresses required by `dagu worker` (`host:port,...`) |
@@ -1067,6 +1075,21 @@ make build    # Build frontend + Go binary
 make test     # Run tests with race detection
 make lint     # Run golangci-lint
 ```
+
+The repository's [prek](https://prek.j178.dev/) pre-commit configuration runs
+`make check` once for staged Go files, `go.mod`, `go.sum`, `Makefile`,
+`.golangci.*`, or `.pre-commit-config.yaml` changes, without passing filenames.
+It requires `prek`, `make`, and Go with the toolchain declared in `go.mod`
+available; the hook selects that toolchain through `GOTOOLCHAIN`. `make check`
+checks Go fixes, formats Go files, and lints the default, Windows, and Darwin
+builds. It installs the linter declared by the Makefile, so initial runs need
+network access or populated Go caches. Formatting can change working files;
+inspect and stage those changes before retrying a rejected commit. Run
+`prek run` to check staged changes or `prek run --all-files` for all tracked files.
+
+Docs-only changes skip the Go hook and do not need the Go toolchain. This hook
+does not replace relevant package tests or frontend checks: run affected Go tests
+and, for UI changes, `pnpm test`, `pnpm typecheck`, and `pnpm build` in `ui/`.
 
 For the local UI development loop, run `make run-server` from the repository
 root, then follow [`ui/README.md`](./ui/README.md). See
