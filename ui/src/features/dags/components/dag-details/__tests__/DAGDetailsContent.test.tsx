@@ -5,6 +5,7 @@ import { render, screen } from '@testing-library/react';
 import React from 'react';
 import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it, vi } from 'vitest';
+import { NodeStatus, Stream } from '@/api/v1/schema';
 import DAGDetailsContent from '../DAGDetailsContent';
 
 vi.mock('../..', () => ({
@@ -34,7 +35,19 @@ vi.mock('../../dag-execution', () => ({
   DAGExecutionHistory: () => null,
   ExecutionLog: () => null,
   LogViewer: () => null,
-  StepLog: () => null,
+  StepLog: ({
+    stream,
+    node,
+  }: {
+    stream?: string;
+    node?: { status?: number };
+  }) => (
+    <div
+      data-testid="step-log"
+      data-stream={stream}
+      data-node-status={node?.status}
+    />
+  ),
 }));
 
 vi.mock('../DAGSettingsTab', () => ({
@@ -78,7 +91,6 @@ function renderContent(activeTab = 'status', isModal = true) {
         dag={dag}
         currentDAGRun={currentDAGRun}
         refreshFn={vi.fn()}
-        formatDuration={vi.fn()}
         activeTab={activeTab}
         isModal={isModal}
         fillHeight
@@ -97,11 +109,12 @@ describe('DAGDetailsContent', () => {
     );
   });
 
-  it('keeps compact navigation labels visible', () => {
+  // One tab row serves every width, so each label appears once.
+  it('shows each workflow tab once', () => {
     renderContent();
 
     for (const label of [
-      'Latest Run',
+      'Overview',
       'Incidents',
       'Spec',
       'Webhook',
@@ -110,18 +123,47 @@ describe('DAGDetailsContent', () => {
       'History',
       'Wiki',
     ]) {
-      expect(screen.getAllByText(label)).toHaveLength(2);
+      expect(screen.getAllByText(label)).toHaveLength(1);
     }
   });
 
   it.each(['log', 'dagRun-log'])(
-    'keeps both %s navigation labels visible',
+    'adds a Log tab while %s is open',
     (activeTab) => {
       renderContent(activeTab);
 
-      expect(screen.getAllByText('Log')).toHaveLength(2);
+      expect(screen.getAllByText('Log')).toHaveLength(1);
     }
   );
+
+  it('opens the full-page step log on the linked stream with live status', () => {
+    render(
+      <MemoryRouter>
+        <DAGDetailsContent
+          fileName="release-notes"
+          dag={dag}
+          currentDAGRun={
+            {
+              ...(currentDAGRun as object),
+              nodes: [{ step: { name: 'build' }, status: NodeStatus.Running }],
+            } as never
+          }
+          refreshFn={vi.fn()}
+          activeTab="log"
+          stepName="build"
+          logStream={Stream.stderr}
+          fillHeight
+        />
+      </MemoryRouter>
+    );
+
+    const stepLog = screen.getByTestId('step-log');
+    expect(stepLog).toHaveAttribute('data-stream', Stream.stderr);
+    expect(stepLog).toHaveAttribute(
+      'data-node-status',
+      String(NodeStatus.Running)
+    );
+  });
 
   it('does not link the modal-only Wiki tab from the DAG page', () => {
     renderContent('status', false);

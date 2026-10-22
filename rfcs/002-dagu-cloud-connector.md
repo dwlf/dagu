@@ -84,7 +84,7 @@ a way to activate a license, not as a new concept:
 ```text
  Dagu server                           Dagu Cloud console                 Owner (browser)
    │ secret = 32 random bytes                 │                                │
-   │ open /servers/connect?code=sha256(secret)&server_id=…&name=… ───────────▶ │
+   │ open /servers/connect?code=sha256(secret)&server_id=…&name=…&version=… ─▶ │
    │                                          │ ◀── sign in, pick workspace ── │
    │                                          │ ◀── approve ────────────────── │
    │ POST /api/v1/licenses/connect {connection_secret, server_id} (every 3 s)  │
@@ -92,14 +92,47 @@ a way to activate a license, not as a new concept:
    │ persist activation (as `license activate` does today)                     │
 ```
 
-The approval page states what the server will report. Approvals expire after
-15 minutes, as the console enforces today.
+The approval page states what the server will report. The admin may choose
+the report level when starting the connection; the URL then carries the level
+in effect as `report`, the approval page states it, and reporting starts once
+the license is granted. Approvals expire after 15 minutes, as the console
+enforces today.
+
+`version` is the Dagu version, the same string the server sends as
+`client_version`: `2.19.2` from a release, `v2.19.2-3-gabc1234` from a source
+build, or `dev`. The approval page uses it to turn away servers too old for
+the plan on offer (see Free plan).
 
 ### Disconnecting
 
 **Disconnect** on the license settings page calls `POST /api/v1/licenses/release`,
 clears the activation, and stops reporting and remote access at once. Disconnecting
 from the console has the same effect on the next report (`401`).
+
+### Free plan
+
+A workspace can connect a server without a paid plan, so that Dagu Cloud
+monitors it: the server's runs, failures, and trends, with an email when a
+workflow fails or the server stops reporting.
+
+- **Token.** The license token has `plan` `free` and an empty `features`
+  list. Dagu treats it as Community for every paid feature: SSO, RBAC, audit
+  logs, incident routing, and API keys beyond two stay off, even if the token
+  claims features.
+- **Still connected.** The server checks in hourly and reports at the level
+  its admin chooses, as any connected server does. Starting another
+  connection fails as it does with a paid license, and disconnecting frees the
+  server's free slot.
+- **Slower reports.** Dagu Cloud may answer a free server with
+  `next_report_seconds` `300`, and answer reports that come sooner, early
+  reports included, with `429` and `Retry-After`. The reporter honors both
+  (see Cadence and Wire contract).
+- **Plan changes.** The next check-in replaces the token, so paid features
+  turn on or off without reconnecting.
+- **Version gate.** Releases before v2.19.2 treat any license as paid. Dagu
+  Cloud refuses a free connection when `version` is missing or older than
+  v2.19.2, with the message "Update Dagu to v2.19.2 or later to use free
+  monitoring."
 
 ## Reporting
 
@@ -110,8 +143,8 @@ runs. A field is listed here, under its level, before any release sends it.
 
 Every report also carries what identifies and authenticates the server, as
 its license check-in does: the protocol version, license ID, server ID, and
-heartbeat secret. At `runs` it also carries the reporter's cursor and, after
-events were lost, the time they were lost from.
+heartbeat secret, and the level it was sent at. At `runs` it also carries the
+reporter's cursor and, after events were lost, the time they were lost from.
 
 | Level | Fields | When |
 | --- | --- | --- |
@@ -136,7 +169,7 @@ them sensitive chooses `health`, which sends neither.
 
 | `cloud.report` | Sends |
 | --- | --- |
-| unset or `off` (default) | Nothing beyond the license check-in |
+| unset or `off` (default) | Nothing beyond the license check-in, except one report that says so, carrying only what identifies the server, when the level becomes `off` after a report at `health` or `runs` |
 | `health` | Dagu version, OS, architecture, start time, and which services run |
 | `runs` | Also the status of finished runs and the runs in progress: DAG names, run IDs, status, triggers, times, failed step names |
 
@@ -152,7 +185,9 @@ them sensitive chooses `health`, which sends neither.
 - **Inspectable and reversible.** The license settings page shows the level,
   when the last report was sent, and the exact last report, with its
   heartbeat secret redacted. Turning it off takes effect at once and stops a
-  report in flight, and Dagu Cloud can delete what a server reported.
+  report in flight; one last report then says that reporting is off, so that
+  Dagu Cloud does not take the silence for an outage. Dagu Cloud can delete
+  what a server reported.
 - **No catching up.** When the level drops below `runs` while the server
   runs, the reporter moves its cursor to the newest event, so choosing `runs`
   again never sends the runs that finished in between. It lists the runs in
@@ -169,7 +204,7 @@ was queued, started, began waiting, or finished. Once a report is throttled,
 rejected, or fails, nothing is reported early until one is accepted, and news
 that an accepted report carried calls for no further early report. Dagu Cloud
 can lengthen the interval in its response (`next_report_seconds`) to shed
-load.
+load, and does for free servers (see Free plan).
 
 Many workflows run at the top of the hour, so reports are spread out:
 
@@ -217,6 +252,7 @@ activation's credentials, as the heartbeat is.
   "license_id": "…",
   "server_id": "…",
   "heartbeat_secret": "…",
+  "level": "runs",
   "health": { "version": "3.0.0", "os": "linux", "arch": "amd64",
               "started_at": "2026-10-09T12:00:00Z",
               "services": [{ "name": "scheduler", "instances": 1 },
@@ -235,6 +271,9 @@ activation's credentials, as the heartbeat is.
   "gap": { "since": "2026-10-08T00:00:00Z" }
 }
 ```
+
+`level` is the level the report was sent at, `health` or `runs`, or `off`
+for the report that says reporting stopped.
 
 A scheduler count of zero means no scheduler holds the lock; leaving
 `services` out means the count is unknown.
@@ -259,6 +298,23 @@ recently started or queued first. `active_total` counts them all. Each
 report's list replaces the one before. Both are left out at `health`, and at
 `runs` until the reporter knows the runs in progress; a report without them
 says nothing about the runs in progress.
+
+**Reporting off.** When the level becomes `off` after a report at `health` or
+`runs`, whether chosen in the UI or set in configuration and applied at the
+next start, the next report due is the last one:
+
+```json
+{ "protocol": 2, "license_id": "…", "server_id": "…",
+  "heartbeat_secret": "…", "level": "off" }
+```
+
+It carries no `health` and no runs. It is retried like any report on `429`,
+`5xx`, and network errors; once Dagu Cloud answers otherwise, nothing more is
+sent until a level that reports is chosen. The server records the level of
+its last report in the data directory, so a server stopped before sending
+this report sends it after it starts. If that record cannot be saved, which
+the server logs, a restart may send the report again or not at all. A level
+that cannot be read stops reports without it, since no one chose `off`.
 
 The response is:
 
@@ -414,6 +470,7 @@ the relay and announced in its reply to `hello`.
 | Release | Ships |
 | --- | --- |
 | v2.19 | Browser approval; reporting; the `cloud` config section. Dagu Cloud's report endpoint must be live first. |
+| v2.19.2 | The free plan, and `version` on the connect URL. |
 | v2.20 | The `dagucloud` tunnel provider, carrying webhook deliveries for public triggers only (RFC 004). |
 | v3.0 | Remote access over the same connection: assertions, the Remote access control, the UI bar. License audience check. |
 

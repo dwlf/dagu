@@ -97,8 +97,7 @@ function WikiContent() {
   const normalizedWorkspaceSelection =
     sanitizeWorkspaceSelection(workspaceSelection);
   const selectedWorkspace = workspaceNameForSelection(workspaceSelection);
-  const canCreateAtRoot =
-    normalizedWorkspaceSelection.kind !== WorkspaceKind.all;
+  // From the all view, root pages go to the default (no-workspace) Wiki.
   const rootCreateWorkspace =
     normalizedWorkspaceSelection.kind === WorkspaceKind.workspace
       ? (normalizedWorkspaceSelection.workspace ?? null)
@@ -484,9 +483,21 @@ function WikiContent() {
       const { deletedCount, failedCount } =
         await deleteBatch(batchDeleteTargets);
       if (failedCount > 0) {
-        showToast(`Deleted ${deletedCount}, ${failedCount} failed`);
+        showToast(
+          ts('Deleted {deleted}, {failed} failed', {
+            deleted: deletedCount,
+            failed: failedCount,
+          })
+        );
       } else {
-        showToast(`Deleted ${deletedCount} items`);
+        showToast(
+          ts(
+            deletedCount === 1
+              ? 'Deleted {count} item'
+              : 'Deleted {count} items',
+            { count: deletedCount }
+          )
+        );
       }
     } catch {
       showToast('Failed to delete Wiki pages');
@@ -494,7 +505,7 @@ function WikiContent() {
       setBatchDeleteConfirmOpen(false);
       setBatchDeleteTargets([]);
     }
-  }, [batchDeleteTargets, canWrite, deleteBatch, showToast]);
+  }, [batchDeleteTargets, canWrite, deleteBatch, showToast, ts]);
 
   // Batch delete from selection bar
   const handleBatchDeleteFromBar = useCallback(
@@ -523,12 +534,7 @@ function WikiContent() {
       error={treeError}
       onRetry={() => mutate()}
       onContextAction={handleContextAction}
-      canCreateNew={canCreateAtRoot}
       onCreateNew={() => {
-        if (!canCreateAtRoot) {
-          showToast('Select a workspace before creating a Wiki page');
-          return;
-        }
         setCreateParentDir('');
         setCreateWorkspace(rootCreateWorkspace);
         setCreateError(null);
@@ -606,19 +612,22 @@ function WikiContent() {
       <I18nProps>
         <ConfirmModal
           title="Delete Wiki"
-          buttonText={ts('Delete {count} items', {
-            count: batchDeleteTargets.length,
-          })}
+          buttonText={ts(
+            batchDeleteTargets.length === 1
+              ? 'Delete {count} item'
+              : 'Delete {count} items',
+            { count: batchDeleteTargets.length }
+          )}
           visible={batchDeleteConfirmOpen}
           dismissModal={() => setBatchDeleteConfirmOpen(false)}
           onSubmit={handleBatchDelete}
         >
           <p className="text-sm text-muted-foreground">
             {ts(
-              'Are you sure you want to delete {count} items? This cannot be undone.',
-              {
-                count: batchDeleteTargets.length,
-              }
+              batchDeleteTargets.length === 1
+                ? 'Are you sure you want to delete {count} item? This cannot be undone.'
+                : 'Are you sure you want to delete {count} items? This cannot be undone.',
+              { count: batchDeleteTargets.length }
             )}
           </p>
         </ConfirmModal>
@@ -694,6 +703,9 @@ function WikiPage() {
         key={wikiTabStorageKey}
         storageKey={wikiTabStorageKey}
       >
+        <h1 className="sr-only">
+          <I18nText text={'Wiki'} />
+        </h1>
         <WikiContent />
       </WikiPageTabProvider>
     </UnsavedChangesProvider>

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import { LicenseBadge } from '@/components/LicenseBadge';
+import { CommandPaletteProvider } from '@/components/command-palette/CommandPaletteProvider';
 import { LicenseBanner } from '@/components/LicenseBanner';
 import { MonitoringNotice } from '@/components/MonitoringNotice';
 import { SchedulerPauseBanner } from '@/components/SchedulerPauseBanner';
@@ -107,6 +108,7 @@ function Content({ navbarColor, children }: LayoutProps) {
         backgroundColor: navbarColor,
         color: contrastColor,
         '--sidebar-foreground': contrastColor,
+        '--sidebar-accent-foreground': contrastColor,
         '--sidebar-primary': contrastColor,
         '--sidebar-ring': contrastColor,
         '--sidebar-hover': getSidebarOverlayColor(contrastColor ?? '#fff', 0.1),
@@ -138,6 +140,10 @@ function Content({ navbarColor, children }: LayoutProps) {
 
     closeMenuButtonRef.current?.focus();
     const closeOnEscape = (event: KeyboardEvent) => {
+      // A menu inside the sidebar already handled the key.
+      if (event.defaultPrevented) {
+        return;
+      }
       if (event.key === 'Escape') {
         setIsMobileSidebarOpen(false);
         requestAnimationFrame(() => openMenuButtonRef.current?.focus());
@@ -207,13 +213,13 @@ function Content({ navbarColor, children }: LayoutProps) {
         style={desktopSidebarStyle}
       >
         <div className="flex flex-col h-full">
-          <nav className="flex-1 overflow-y-auto min-h-0 px-2 py-3">
+          <div className="flex-1 overflow-y-auto min-h-0 px-2 py-3">
             <MainListItems
               isOpen={isSidebarExpanded}
               onToggle={toggleSidebar}
               customColor={hasCustomColor}
             />
-          </nav>
+          </div>
         </div>
       </aside>
 
@@ -283,14 +289,14 @@ function Content({ navbarColor, children }: LayoutProps) {
             aria-modal="true"
             aria-labelledby="mobile-navigation-title"
             className={cn(
-              'h-full w-64 overflow-hidden shadow-lg border-r border-border',
+              'flex h-full w-64 flex-col overflow-hidden shadow-lg border-r border-border',
               !hasCustomColor && 'bg-sidebar text-sidebar-foreground',
               hasCustomColor && 'custom-sidebar-color'
             )}
             style={sidebarStyle}
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="flex justify-between items-center p-4 border-b border-sidebar-border">
+            <div className="flex shrink-0 justify-between items-center p-4 border-b border-sidebar-border">
               <span
                 id="mobile-navigation-title"
                 className={cn(
@@ -313,14 +319,14 @@ function Content({ navbarColor, children }: LayoutProps) {
                 <X className="h-5 w-5" />
               </button>
             </div>
-            <div className="flex flex-col h-full pt-2">
-              <nav className="flex-1 overflow-y-auto min-h-0 px-2">
-                <MainListItems
-                  isOpen={true}
-                  onNavItemClick={closeMobileSidebar}
-                  customColor={hasCustomColor}
-                />
-              </nav>
+            {/* The menu scrolls its nav and keeps its footer in view. */}
+            <div className="min-h-0 flex-1 px-2 pt-2">
+              <MainListItems
+                isOpen={true}
+                onNavItemClick={closeMobileSidebar}
+                customColor={hasCustomColor}
+                hideHeader
+              />
             </div>
           </div>
         </div>
@@ -331,5 +337,9 @@ function Content({ navbarColor, children }: LayoutProps) {
 
 // Default export Layout component
 export default function Layout({ navbarColor, children }: LayoutProps) {
-  return <Content navbarColor={navbarColor}>{children}</Content>;
+  return (
+    <CommandPaletteProvider>
+      <Content navbarColor={navbarColor}>{children}</Content>
+    </CommandPaletteProvider>
+  );
 }

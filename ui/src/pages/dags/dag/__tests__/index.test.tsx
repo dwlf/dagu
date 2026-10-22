@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Yota Hamada
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import React from 'react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -31,6 +31,10 @@ vi.mock('@/hooks/api', () => ({
   useQuery: vi.fn(),
 }));
 
+vi.mock('@/components/MonitoringOffer', () => ({
+  MonitoringOffer: () => <p>Monitoring offer</p>,
+}));
+
 vi.mock('@/hooks/useDAGSSE', () => ({
   useDAGSSE: vi.fn(() => ({})),
 }));
@@ -54,6 +58,7 @@ const useQueryMock = useQuery as unknown as {
 
 const appBarValue = {
   selectedRemoteNode: 'local',
+  setTitle: vi.fn(),
   workspaceSelection: { kind: WorkspaceKind.all },
 } as never;
 
@@ -85,6 +90,7 @@ function renderPage(initialEntry = '/dags/release-notes') {
         <Routes>
           <Route path="/dags/:fileName" element={<DAGDetails />} />
           <Route path="/dags/:fileName/:tab" element={<DAGDetails />} />
+          <Route path="*" element={null} />
         </Routes>
       </AppBarContext.Provider>
     </MemoryRouter>
@@ -119,9 +125,110 @@ describe('DAGDetails page', () => {
   });
 
   it('falls back to the latest run when a pinned run is missing', () => {
-    renderPage('/dags/release-notes?dagRunId=missing&dagRunName=release-notes');
+    renderPage(
+      '/dags/release-notes/log?dagRunId=missing&dagRunName=release-notes&step=build'
+    );
 
     expect(screen.getByText('Output for run-1')).toBeVisible();
+  });
+
+  it('explains when the workflow does not exist', () => {
+    useQueryMock.mockImplementation(
+      () =>
+        ({
+          data: undefined,
+          error: { code: 'not_found', message: 'DAG is not found' },
+          mutate: vi.fn(),
+        }) as never
+    );
+
+    renderPage('/dags/missing-flow');
+
+    expect(
+      screen.getByRole('heading', { name: 'Workflow not found' })
+    ).toBeVisible();
+    expect(screen.getByText('missing-flow')).toBeVisible();
+    expect(
+      screen.getByRole('link', { name: 'Back to Workflows' })
+    ).toHaveAttribute('href', '/dags');
+    expect(screen.queryByTestId('dag-details-content')).toBeNull();
+  });
+
+  it('reports a failed load with the server message and a retry', () => {
+    const mutate = vi.fn();
+    useQueryMock.mockImplementation(
+      () =>
+        ({
+          data: undefined,
+          error: { code: 'internal_error', message: 'disk is full' },
+          mutate,
+        }) as never
+    );
+
+    renderPage();
+
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      "Couldn't load this workflow"
+    );
+    expect(screen.getByText('disk is full')).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(mutate).toHaveBeenCalled();
+  });
+
+  // Runs are selected on the run page; older links that name a run on the
+  // workflow page land there instead.
+  it('sends a run named on the workflow page to the run page', async () => {
+    renderPage(
+      '/dags/release-notes?dagRunId=run-7&subDAGRunId=child-2&dagRunName=release-notes&step=deploy'
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('location')).toHaveTextContent(
+        '/dag-runs/release-notes/run-7?remoteNode=local&subDAGRunId=child-2&dagRunId=run-7&dagRunName=release-notes&step=deploy'
+      );
+    });
+  });
+
+  // A schedule runs unattended, which is when an alert matters.
+  describe('monitoring offer', () => {
+    function mockScheduled(suspended: boolean) {
+      useQueryMock.mockImplementation(
+        (path) =>
+          ({
+            data:
+              path === '/dags/{fileName}'
+                ? {
+                    ...dagData,
+                    dag: {
+                      ...dagData.dag,
+                      schedule: [{ expression: '0 9 * * *' }],
+                    },
+                    suspended,
+                  }
+                : undefined,
+            mutate: vi.fn(),
+          }) as never
+      );
+    }
+
+    it('appears on the Overview of a scheduled workflow', () => {
+      mockScheduled(false);
+
+      renderPage();
+
+      expect(screen.getByText('Monitoring offer')).toBeVisible();
+    });
+
+    it.each([
+      ['a suspended schedule', '/dags/release-notes', true],
+      ['another tab', '/dags/release-notes/spec', false],
+    ])('stays out of %s', (_, path, suspended) => {
+      mockScheduled(suspended);
+
+      renderPage(path);
+
+      expect(screen.queryByText('Monitoring offer')).not.toBeInTheDocument();
+    });
   });
 
   it('redirects the legacy docs tab to the Wiki tab', async () => {

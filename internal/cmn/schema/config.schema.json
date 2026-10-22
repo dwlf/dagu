@@ -1113,6 +1113,10 @@
           "description": "Coordinator HTTP health check port. Default: 8091. Set to 0 to disable.",
           "minimum": 0,
           "maximum": 65535
+        },
+        "worker_wait_timeout": {
+          "type": "string",
+          "description": "How long a dispatch with no healthy worker matching its selector is held, as a queued run, for such a worker to register before the run fails. Default: '2m'. Set to '0' to refuse the dispatch at once."
         }
       }
     },
@@ -1143,6 +1147,73 @@
           "type": "boolean",
           "description": "Keep Chromium's sandbox on for every browser started on this host. Set to false only where the sandbox cannot start; pages are then isolated from the host only by the operating system user.",
           "default": true
+        },
+        "guard_client_certificates": {
+          "type": "boolean",
+          "description": "Send a browser's other HTTPS requests through the certificate proxy too, so the browser never asks the operating system for a client certificate; a site that asks for one gets none and the step says so. Defaults to on whenever the browser presents client certificates."
+        },
+        "trusted_cas": {
+          "type": "array",
+          "description": "Server certificate authorities trusted only for the hosts each names, in addition to existing trust. Matching entries combine independently of client certificates.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["hosts", "ca_file"],
+            "properties": {
+              "hosts": {
+                "type": "array",
+                "minItems": 1,
+                "items": { "type": "string", "minLength": 1 },
+                "description": "Host names, IP addresses, *.example.com for subdomains excluding the apex, or * for every host."
+              },
+              "ca_file": {
+                "type": "string",
+                "minLength": 1,
+                "description": "PEM file of certificate authorities or self-signed server certificates, without private keys. Text around the certificates is ignored."
+              }
+            }
+          }
+        },
+        "client_certificates": {
+          "type": "array",
+          "description": "TLS client certificates every browser started on this host presents to the hosts each names, after those a step names. The first entry whose hosts match is used.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["hosts"],
+            "properties": {
+              "hosts": {
+                "type": "array",
+                "minItems": 1,
+                "items": { "type": "string", "minLength": 1 },
+                "description": "Hosts the certificate is presented to: a host name or IP address, *.example.com for the subdomains of example.com, or * for every host."
+              },
+              "pfx_file": {
+                "type": "string",
+                "description": "PKCS#12 (.pfx or .p12) file holding the certificate, its private key, and optionally its chain."
+              },
+              "cert_file": {
+                "type": "string",
+                "description": "PEM certificate, followed by its chain. Used with key_file instead of pfx_file."
+              },
+              "key_file": {
+                "type": "string",
+                "description": "Unencrypted PEM private key for cert_file."
+              },
+              "ca_file": {
+                "type": "string",
+                "description": "PEM certificates to trust for these hosts' servers, in addition to the system's."
+              },
+              "passphrase": {
+                "type": "string",
+                "description": "Passphrase of pfx_file."
+              },
+              "passphrase_file": {
+                "type": "string",
+                "description": "File holding the passphrase of pfx_file."
+              }
+            }
+          }
         }
       }
     },
@@ -1647,7 +1718,7 @@
         "report": {
           "type": "string",
           "enum": ["off", "health", "runs"],
-          "description": "What this server reports to Dagu Console beyond its license check-in. off (default) reports nothing; health reports the Dagu version, OS, architecture, start time, and how many schedulers and coordinators run; runs also reports each reportable status change of a top-level DAG run (events without a valid status snapshot, or with names or IDs longer than Dagu Console keeps, are left out): DAG name, run and attempt IDs, status, times, and up to 50 failed step names. Logs, outputs, parameters, commands, error messages, DAG files, and the values of workflow secrets are never sent. Every report also carries the license and server IDs and the heartbeat secret, as the license check-in does."
+          "description": "What this server reports to Dagu Console beyond its license check-in. off (default) reports nothing but one report saying so after health or runs; health reports the Dagu version, OS, architecture, start time, and how many schedulers and coordinators run; runs also reports each reportable status change of a top-level DAG run (events without a valid status snapshot, or with names or IDs longer than Dagu Console keeps, are left out): DAG name, run and attempt IDs, status, times, and up to 50 failed step names. Logs, outputs, parameters, commands, error messages, DAG files, and the values of workflow secrets are never sent. Every report also carries the license and server IDs and the heartbeat secret, as the license check-in does."
         }
       }
     }

@@ -169,6 +169,8 @@ func TestLoad_Env(t *testing.T) {
 		"DAGU_COORDINATOR_PORT":        "50099",
 		"DAGU_COORDINATOR_HEALTH_PORT": "50101",
 
+		"DAGU_COORDINATOR_WORKER_WAIT_TIMEOUT": "90s",
+
 		"DAGU_WORKER_ID":              "test-worker-123",
 		"DAGU_WORKER_MAX_ACTIVE_RUNS": "200",
 		"DAGU_WORKER_HEALTH_PORT":     "50102",
@@ -341,11 +343,12 @@ func TestLoad_Env(t *testing.T) {
 		},
 		Queues: Queues{Enabled: false},
 		Coordinator: Coordinator{
-			Enabled:    true,
-			Host:       "0.0.0.0",
-			Advertise:  "dagu-coordinator",
-			Port:       50099,
-			HealthPort: 50101,
+			Enabled:           true,
+			Host:              "0.0.0.0",
+			Advertise:         "dagu-coordinator",
+			Port:              50099,
+			HealthPort:        50101,
+			WorkerWaitTimeout: 90 * time.Second,
 		},
 		Worker: Worker{
 			ID:              "test-worker-123",
@@ -428,6 +431,29 @@ worker:
 
 	assert.Zero(t, cfg.Coordinator.HealthPort)
 	assert.Zero(t, cfg.Worker.HealthPort)
+}
+
+// The hold for a matching worker defaults to two minutes; "0" turns it into
+// an immediate refusal, and an unparsable value keeps the default.
+func TestLoad_WorkerWaitTimeout(t *testing.T) {
+	for name, tc := range map[string]struct {
+		yaml string
+		want time.Duration
+	}{
+		"default":  {yaml: "# minimal config", want: 2 * time.Minute},
+		"set":      {yaml: "coordinator:\n  worker_wait_timeout: 45s\n", want: 45 * time.Second},
+		"disabled": {yaml: "coordinator:\n  worker_wait_timeout: \"0\"\n", want: 0},
+		"invalid":  {yaml: "coordinator:\n  worker_wait_timeout: soon\n", want: 2 * time.Minute},
+	} {
+		t.Run(name, func(t *testing.T) {
+			configFile := filepath.Join(t.TempDir(), "config.yaml")
+			require.NoError(t, os.WriteFile(configFile, []byte(tc.yaml), 0600))
+
+			cfg := testLoad(t, WithConfigFile(configFile))
+
+			assert.Equal(t, tc.want, cfg.Coordinator.WorkerWaitTimeout)
+		})
+	}
 }
 
 func TestLoad_WorkerShutdownTimeout(t *testing.T) {
@@ -699,6 +725,80 @@ func TestLoad_BrowserSandboxFromEnv(t *testing.T) {
 	require.True(t, testLoad(t).Browser.NoSandbox)
 }
 
+func TestLoad_BrowserClientCertificates(t *testing.T) {
+	dir := t.TempDir()
+	configFile := filepath.Join(dir, "config.yaml")
+	require.NoError(t, os.WriteFile(configFile, []byte(`
+browser:
+  client_certificates:
+    - hosts: [portal.example.com, "*.corp.example"]
+      pfx_file: `+filepath.Join(dir, "client.p12")+`
+      passphrase_file: `+filepath.Join(dir, "client.passphrase")+`
+    - hosts: ["*"]
+      cert_file: `+filepath.Join(dir, "client.pem")+`
+      key_file: `+filepath.Join(dir, "client.key")+`
+      ca_file: `+filepath.Join(dir, "ca.pem")+`
+`), 0o600))
+
+	cfg := testLoad(t, WithConfigFile(configFile))
+	require.Equal(t, []BrowserClientCertificate{
+		{
+			Hosts:          []string{"portal.example.com", "*.corp.example"},
+			PFXFile:        filepath.Join(dir, "client.p12"),
+			PassphraseFile: filepath.Join(dir, "client.passphrase"),
+		},
+		{
+			Hosts:    []string{"*"},
+			CertFile: filepath.Join(dir, "client.pem"),
+			KeyFile:  filepath.Join(dir, "client.key"),
+			CAFile:   filepath.Join(dir, "ca.pem"),
+		},
+	}, cfg.Browser.ClientCertificates)
+}
+
+func TestLoad_BrowserTrustedCAs(t *testing.T) {
+	dir := t.TempDir()
+	configFile := filepath.Join(dir, "config.yaml")
+	caFile := filepath.Join(dir, "ca.pem")
+	require.NoError(t, os.WriteFile(configFile, []byte("browser:\n  trusted_cas:\n    - hosts: [portal.example.com, '*.corp.example']\n      ca_file: "+caFile+"\n"), 0o600))
+	cfg := testLoad(t, WithConfigFile(configFile))
+	assert.Equal(t, []BrowserTrustedCA{{Hosts: []string{"portal.example.com", "*.corp.example"}, CAFile: caFile}}, cfg.Browser.TrustedCAs)
+	for _, value := range []string{"hosts: []\n      ca_file: ca.pem", "hosts: [https://portal.example.com]\n      ca_file: ca.pem", "hosts: [portal.example.com]"} {
+		err := loadWithErrorFromYAML(t, "browser:\n  trusted_cas:\n    - "+value+"\n")
+		require.ErrorContains(t, err, "browser.trusted_cas[0]")
+	}
+}
+
+// The certificate guard follows the browser's certificates unless the
+// config file or the environment turns it on or off.
+func TestLoad_BrowserGuardClientCertificates(t *testing.T) {
+	require.Nil(t, testLoad(t).Browser.GuardClientCertificates, "unset, the guard follows the certificates")
+
+	configFile := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(configFile, []byte("browser:\n  guard_client_certificates: false\n"), 0o600))
+	guard := testLoad(t, WithConfigFile(configFile)).Browser.GuardClientCertificates
+	require.NotNil(t, guard)
+	require.False(t, *guard)
+
+	t.Setenv("DAGU_BROWSER_GUARD_CLIENT_CERTIFICATES", "true")
+	guard = testLoad(t).Browser.GuardClientCertificates
+	require.NotNil(t, guard)
+	require.True(t, *guard)
+}
+
+func TestLoad_BrowserClientCertificatesRejectsMalformed(t *testing.T) {
+	configFile := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(configFile, []byte(`
+browser:
+  client_certificates:
+    - hosts: [portal.example.com]
+      cert_file: /tmp/client.pem
+`), 0o600))
+
+	err := testLoadWithError(t, WithConfigFile(configFile))
+	require.ErrorContains(t, err, "browser.client_certificates[0]: set pfx_file, or cert_file and key_file")
+}
+
 func TestLoad_OpenCodeRejectsReservedPassthrough(t *testing.T) {
 	configFile := filepath.Join(t.TempDir(), "config.yaml")
 	require.NoError(t, os.WriteFile(configFile, []byte(`
@@ -959,10 +1059,11 @@ scheduler:
 			},
 		},
 		Coordinator: Coordinator{
-			Enabled:    true,
-			Host:       "coordinator.example.com",
-			Port:       8081,
-			HealthPort: 8091,
+			Enabled:           true,
+			Host:              "coordinator.example.com",
+			Port:              8081,
+			HealthPort:        8091,
+			WorkerWaitTimeout: 2 * time.Minute,
 		},
 		Worker: Worker{
 			ID:              "worker-1",

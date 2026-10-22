@@ -60,6 +60,7 @@ func TestReportPayload(t *testing.T) {
 		"license_id": "lic-1",
 		"server_id": "srv-1",
 		"heartbeat_secret": "hb-secret",
+		"level": "runs",
 		"health": {
 			"version": %q,
 			"os": %q,
@@ -152,26 +153,68 @@ func TestReportJitter(t *testing.T) {
 	}
 }
 
+// A server that is to report but has no license yet checks again within
+// seconds, so that its first report follows an approval in Dagu Console
+// closely. One that reports nothing keeps its interval.
 func TestReportWithoutCredentials(t *testing.T) {
 	t.Parallel()
 
-	console := newFakeConsole(t)
-	var activated atomic.Bool
-	credentials := func() (license.CloudCredentials, bool) {
-		if !activated.Load() {
-			return license.CloudCredentials{}, false
+	t.Run("reporting", func(t *testing.T) {
+		t.Parallel()
+
+		console := newFakeConsole(t)
+		var activated atomic.Bool
+		credentials := func() (license.CloudCredentials, bool) {
+			if !activated.Load() {
+				return license.CloudCredentials{}, false
+			}
+			return console.credentials()
 		}
-		return console.credentials()
-	}
-	clock := startReporter(t.Context(), t, newReporter(credentials, nil, fixedLevel(config.ReportRuns)), noJitter)
+		clock := startReporter(t.Context(), t, newReporter(credentials, nil, fixedLevel(config.ReportRuns)), noJitter)
 
-	clock.wait()
-	assert.Equal(t, time.Minute, clock.next())
-	assert.Empty(t, console.reports, "nothing is sent without credentials")
+		clock.wait()
+		assert.Equal(t, 5*time.Second, clock.next())
+		assert.Empty(t, console.reports, "nothing is sent without credentials")
 
-	activated.Store(true)
-	clock.elapse()
-	assert.Equal(t, "srv-1", decodeReport(t, console.next(t)).ServerID)
+		activated.Store(true)
+		clock.elapse()
+		assert.Equal(t, "srv-1", decodeReport(t, console.next(t)).ServerID)
+	})
+
+	// Choosing a level while connecting ends a long wait, so that the first
+	// report follows the console's approval within seconds.
+	t.Run("turned on while waiting", func(t *testing.T) {
+		t.Parallel()
+
+		console := newFakeConsole(t)
+		var activated atomic.Bool
+		credentials := func() (license.CloudCredentials, bool) {
+			if !activated.Load() {
+				return license.CloudCredentials{}, false
+			}
+			return console.credentials()
+		}
+		monitoring := NewMonitoring("", &memoryStore{})
+		clock := startReporter(t.Context(), t, newReporter(credentials, nil, monitoring), noJitter)
+
+		assert.Equal(t, maxStartDelay/2, clock.wait())
+		require.NoError(t, monitoring.SetLevel(t.Context(), config.ReportRuns))
+		assert.Equal(t, 5*time.Second, clock.wait(), "the start delay ends once reporting is on")
+
+		activated.Store(true)
+		clock.elapse()
+		assert.Equal(t, "srv-1", decodeReport(t, console.next(t)).ServerID)
+	})
+
+	t.Run("off", func(t *testing.T) {
+		t.Parallel()
+
+		noCredentials := func() (license.CloudCredentials, bool) { return license.CloudCredentials{}, false }
+		clock := startReporter(t.Context(), t, newReporter(noCredentials, nil, NewMonitoring("", &memoryStore{})), noJitter)
+
+		clock.wait()
+		assert.Equal(t, time.Minute, clock.next())
+	})
 }
 
 func TestReportTooManyRequests(t *testing.T) {
@@ -305,7 +348,26 @@ func noJitter() float64 { return 0.5 }
 
 // fixedLevel is monitoring whose level configuration fixes.
 func fixedLevel(level config.ReportLevel) *Monitoring {
-	return NewMonitoring(level, nil)
+	return NewMonitoring(level, &memoryStore{})
+}
+
+// memoryStore is a StateStore that keeps the state in memory.
+type memoryStore struct {
+	mu   sync.Mutex
+	data []byte
+}
+
+func (s *memoryStore) Load(context.Context) ([]byte, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.data, s.data != nil, nil
+}
+
+func (s *memoryStore) Save(_ context.Context, data []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data = data
+	return nil
 }
 
 // startReporter runs r with fixed randomness and a clock the test controls.

@@ -4,6 +4,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"net/netip"
 	"net/url"
@@ -14,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/dagucloud/dagu/v2/internal/auth"
+	"github.com/dagucloud/dagu/v2/internal/cmn/hostpattern"
 	"github.com/dagucloud/dagu/v2/internal/workspace"
 )
 
@@ -59,6 +61,82 @@ type BrowserConfig struct {
 	// this host, for hosts where the sandbox cannot start. Pages are then
 	// isolated from the host only by the operating system user.
 	NoSandbox bool
+	// ClientCertificates are presented by every browser started on this
+	// host, after the certificates a step names itself.
+	ClientCertificates []BrowserClientCertificate
+	// TrustedCAs add server trust only for the hosts each authority names.
+	TrustedCAs []BrowserTrustedCA
+	// GuardClientCertificates sends a browser's other https: requests
+	// through the certificate proxy too, so the browser never asks the
+	// operating system for a client certificate. Unset, it is on whenever
+	// the browser presents certificates.
+	GuardClientCertificates *bool
+}
+
+// BrowserTrustedCA adds server certificate authorities for specific hosts.
+type BrowserTrustedCA struct {
+	Hosts  []string `json:"hosts"`
+	CAFile string   `json:"ca_file"`
+}
+
+// Validate rejects an authority without a file or valid host patterns.
+func (c BrowserTrustedCA) Validate() error {
+	if len(c.Hosts) == 0 {
+		return errors.New("hosts must list at least one host pattern")
+	}
+	for _, host := range c.Hosts {
+		if err := hostpattern.Validate(host); err != nil {
+			return err
+		}
+	}
+	if strings.TrimSpace(c.CAFile) == "" {
+		return errors.New("ca_file must name a PEM certificate authority file")
+	}
+	return nil
+}
+
+// BrowserClientCertificate is a TLS client certificate a browser presents to
+// the hosts it names, read from a PKCS#12 file or from a PEM certificate and
+// key.
+type BrowserClientCertificate struct {
+	// Hosts are host patterns: a host name or IP address, *.example.com for
+	// the subdomains of example.com, or * for every host.
+	Hosts    []string `json:"hosts"`
+	PFXFile  string   `json:"pfx_file,omitempty"`
+	CertFile string   `json:"cert_file,omitempty"`
+	KeyFile  string   `json:"key_file,omitempty"`
+	// CAFile adds PEM certificates to those trusted for the hosts' servers.
+	CAFile string `json:"ca_file,omitempty"`
+	// Passphrase or PassphraseFile unlocks PFXFile.
+	Passphrase     string `json:"passphrase,omitempty"`
+	PassphraseFile string `json:"passphrase_file,omitempty"`
+}
+
+// Validate rejects a certificate whose hosts or files are malformed. A host
+// holding a ${...} reference is left to be checked once it is resolved.
+func (c BrowserClientCertificate) Validate() error {
+	if len(c.Hosts) == 0 {
+		return errors.New("hosts must list at least one host pattern")
+	}
+	for _, host := range c.Hosts {
+		if strings.Contains(host, "$") {
+			continue
+		}
+		if err := hostpattern.Validate(host); err != nil {
+			return err
+		}
+	}
+	switch {
+	case c.PFXFile != "" && (c.CertFile != "" || c.KeyFile != ""):
+		return errors.New("set either pfx_file or cert_file and key_file, not both")
+	case c.PFXFile == "" && (c.CertFile == "" || c.KeyFile == ""):
+		return errors.New("set pfx_file, or cert_file and key_file")
+	case c.Passphrase != "" && c.PassphraseFile != "":
+		return errors.New("set either passphrase or passphrase_file, not both")
+	case c.PFXFile == "" && (c.Passphrase != "" || c.PassphraseFile != ""):
+		return errors.New("a passphrase applies only to pfx_file; key_file must hold an unencrypted key")
+	}
+	return nil
 }
 
 // DAGDiscoveryConfig controls how DAG definitions are discovered.
@@ -152,7 +230,8 @@ type CloudConfig struct {
 type ReportLevel string
 
 const (
-	// ReportOff reports nothing.
+	// ReportOff reports nothing but, after a level that reports, one report
+	// saying so.
 	ReportOff ReportLevel = "off"
 	// ReportHealth reports the server's version and which services run.
 	ReportHealth ReportLevel = "health"
@@ -597,6 +676,10 @@ type Coordinator struct {
 	Advertise  string // Registry address (auto-detected if empty)
 	Port       int
 	HealthPort int // HTTP health check port (default: 8091, 0 disables)
+	// WorkerWaitTimeout is how long a dispatch with no healthy matching worker
+	// is held for one to register before the run fails. Default: 2m; 0 refuses
+	// such a dispatch at once.
+	WorkerWaitTimeout time.Duration
 }
 
 // Worker represents the worker configuration.
@@ -783,6 +866,9 @@ func (c *Config) validateCoordinator() error {
 	}
 	if c.Coordinator.HealthPort != 0 && c.Coordinator.Port == c.Coordinator.HealthPort {
 		return fmt.Errorf("coordinator.port and coordinator.health_port must be different when health checks are enabled")
+	}
+	if c.Coordinator.WorkerWaitTimeout < 0 {
+		return fmt.Errorf("invalid coordinator.worker_wait_timeout: %s (must not be negative)", c.Coordinator.WorkerWaitTimeout)
 	}
 	return nil
 }

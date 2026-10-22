@@ -5,6 +5,7 @@ package browser
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,7 +20,11 @@ import (
 
 	stagehand "github.com/browserbase/stagehand/packages/sdk-go/v4"
 	"github.com/dagucloud/dagu/v2/internal/browserhost"
+	"github.com/dagucloud/dagu/v2/internal/browserhost/certproxy"
+	cmnconfig "github.com/dagucloud/dagu/v2/internal/cmn/config"
+	"github.com/dagucloud/dagu/v2/internal/cmn/hostpattern"
 	"github.com/dagucloud/dagu/v2/internal/cmn/procutil"
+	"github.com/dagucloud/dagu/v2/internal/sysproxy"
 )
 
 // extractBatchSource runs an extract with a schema chosen at run time. The
@@ -52,6 +57,21 @@ const (
 	settleQuiet   = 500 * time.Millisecond
 	settleTimeout = 5 * time.Second
 	settlePoll    = 100 * time.Millisecond
+	// writeGrace is how much longer than the wait it is part of a page read
+	// may take; see waitContext.
+	writeGrace = time.Second
+	// botCheckWait bounds how long an action waits for a bot check the site
+	// answered with to pass. A check that needs no person passes within
+	// seconds by loading the page it stood in for, as it would for a
+	// person waiting in front of the window.
+	botCheckWait = 10 * time.Second
+	// headlessScreenWidth and headlessScreenHeight size the screen a browser
+	// without a window reports: a common desktop's, or its window's when
+	// that is larger. Chrome otherwise reports 800x600, smaller than its
+	// window, which pages that size themselves by the screen read as a
+	// phone.
+	headlessScreenWidth  = 1920
+	headlessScreenHeight = 1080
 )
 
 // watchExpression counts the page's requests in flight, including reads of
@@ -100,6 +120,10 @@ var sessionLostMarkers = []string{
 	"target closed before CDP",
 }
 
+// contextLostMarker is the browser's answer to a command on a script context
+// that a new document replaced, in the page or in one of its frames.
+const contextLostMarker = "Cannot find context with specified id"
+
 // selectorVisibleExpression reports whether the selector, a JSON string
 // literal substituted for %s, matches any rendered, visible element.
 const selectorVisibleExpression = `Array.from(document.querySelectorAll(%s)).some((element) => {
@@ -107,6 +131,26 @@ const selectorVisibleExpression = `Array.from(document.querySelectorAll(%s)).som
 	const style = getComputedStyle(element);
 	return box.width > 0 && box.height > 0 && style.visibility !== "hidden" && style.display !== "none";
 })`
+
+// pageOutcomeExpression describes what the browser shows. On its error page
+// that is the network error code and the host of the page that did not
+// load, which Chrome uses as the error page's title, with the status of an
+// HTTP error answer without a body, which the page shows as "HTTP ERROR
+// 403" in every language; on a page, its host, HTTP status, title, and the
+// start of its text.
+var pageOutcomeExpression = fmt.Sprintf(`(() => {
+	const text = ((document.body && document.body.innerText) || "").slice(0, 500);
+	if (location.protocol === "chrome-error:") {
+		const code = document.querySelector(".error-code");
+		const shown = (code && code.textContent) || text;
+		const status = shown.match(/HTTP ERROR (\d{3})/);
+		if (status) return {code: %q, host: document.title, status: Number(status[1]), title: "", text: ""};
+		const match = shown.match(/ERR_[A-Z0-9_]+/);
+		return {code: match ? match[0] : "ERR_FAILED", host: document.title, status: 0, title: "", text: ""};
+	}
+	const entry = performance.getEntriesByType("navigation")[0];
+	return {code: "", host: location.hostname, status: (entry && entry.responseStatus) || 0, title: document.title, text};
+})()`, httpErrorCode)
 
 var errImageInput = errors.New("browser: image input to the model is not supported")
 
@@ -123,6 +167,16 @@ func sandboxHint(noSandbox bool) string {
 		"with browser.sandbox: false in the Dagu config or DAGU_BROWSER_SANDBOX=false"
 }
 
+// headlessScreen returns the flag that gives a browser without a window, at
+// viewport v or the runtime's default size, a screen that holds its window.
+func headlessScreen(v *viewport) string {
+	width, height := headlessScreenWidth, headlessScreenHeight
+	if v != nil {
+		width, height = max(width, v.Width), max(height, v.Height)
+	}
+	return fmt.Sprintf("--screen-info={%dx%d}", width, height)
+}
+
 // sandboxOverride reports why the browser runtime would turn off the sandbox
 // whatever the host setting says, or "" when it keeps it.
 func sandboxOverride() string {
@@ -136,18 +190,60 @@ func sandboxOverride() string {
 }
 
 // stagehandLauncher runs sessions through the Stagehand Go SDK.
-type stagehandLauncher struct{}
+type stagehandLauncher struct {
+	// startProxy starts the proxy presenting client certificates; nil
+	// starts it as a process of the Dagu executable.
+	startProxy func(ctx context.Context, executable string, cfg certproxy.Config) (*certproxy.Handle, error)
+}
 
 var _ launcher = stagehandLauncher{}
 
-func (stagehandLauncher) Launch(ctx context.Context, opts launchOptions) (engine, error) {
+func (l stagehandLauncher) Launch(ctx context.Context, opts launchOptions) (engine, error) {
 	if reason := sandboxOverride(); reason != "" && !opts.NoSandbox {
 		return nil, fmt.Errorf("launch browser: the browser sandbox is on, but the browser runtime turns it off %s; "+
 			"set browser.sandbox: false in the Dagu config or DAGU_BROWSER_SANDBOX=false to run without it", reason)
 	}
-	port, err := freeLoopbackPort()
+	opts.Warn = warnOnce(opts.Warn)
+	key := userAgentKey(opts.Executable)
+	known := knownUserAgent(ctx, opts, key)
+	sent := ""
+	if opts.Headless {
+		sent = known.UserAgent
+	}
+	started, err := l.start(ctx, opts, sent)
 	if err != nil {
 		return nil, err
+	}
+	if started, err = l.confirmUserAgent(ctx, opts, key, known, sent, started); err != nil {
+		return nil, err
+	}
+	cdpURL := started.cdpURL
+	eng, err := startEngine(ctx, started.browser, cdpURL, opts)
+	if err != nil {
+		return nil, errors.Join(err, endUnstartedBrowser(ctx, started.browser, cdpURL, opts.UserDataDir), killCertProxy(started.proxy))
+	}
+	eng.handle.CertProxy = started.proxy
+	extension, err := browserhost.StagehandExtension(ctx, cdpURL)
+	if err != nil {
+		return nil, errors.Join(fmt.Errorf("locate browser runtime extension: %w", err), eng.Close(context.WithoutCancel(ctx)))
+	}
+	eng.handle.ExtensionID = extension.ID
+	eng.handle.ExtensionDir = extension.Path
+	// Without a process ID, a browser that stops answering cannot be ended.
+	eng.handle.BrowserPID, _ = browserhost.BrowserProcessID(ctx, cdpURL)
+	eng.handle.BrowserStartedAt, _ = procutil.StartTime(eng.handle.BrowserPID)
+	if err := eng.handleDownloads(ctx, opts.DownloadsDir); err != nil {
+		return nil, errors.Join(err, eng.Close(context.WithoutCancel(ctx)))
+	}
+	return eng, nil
+}
+
+// start launches the browser opts describe, with the certificate proxy it
+// needs, sending userAgent when it is set.
+func (l stagehandLauncher) start(ctx context.Context, opts launchOptions, userAgent string) (startedBrowser, error) {
+	port, err := freeLoopbackPort()
+	if err != nil {
+		return startedBrowser{}, err
 	}
 	launch := &stagehand.LocalBrowserLaunchOptions{
 		ExecutablePath: opts.Executable,
@@ -163,29 +259,30 @@ func (stagehandLauncher) Launch(ctx context.Context, opts launchOptions) (engine
 	if opts.Proxy != "" {
 		launch.Proxy = &stagehand.LocalProxyConfig{Server: opts.Proxy}
 	}
+	if userAgent != "" {
+		launch.Args = append(launch.Args, "--user-agent="+userAgent)
+	}
+	if opts.Headless {
+		launch.Args = append(launch.Args, headlessScreen(opts.Viewport))
+	}
 	cdpURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+	var proxy *certproxy.Handle
+	if len(opts.ClientCertificates) > 0 || len(opts.TrustedCAs) > 0 || opts.Guard {
+		if proxy, err = l.startCertProxy(ctx, cdpURL, opts); err != nil {
+			return startedBrowser{}, err
+		}
+		// The proxy routes the browser's requests, through browser.proxy
+		// where one is set. The debugging port stays direct.
+		launch.Proxy = nil
+		proxy.DebugPort = port
+		launch.Args = append(launch.Args, proxy.ChromeArgs()...)
+	}
 	browser, err := stagehand.LaunchLocalBrowser(ctx, launch)
 	if err != nil {
 		launchErr := fmt.Errorf("launch browser: %w%s", err, sandboxHint(opts.NoSandbox))
-		return nil, errors.Join(launchErr, endUnstartedBrowser(ctx, nil, cdpURL, opts.UserDataDir))
+		return startedBrowser{}, errors.Join(launchErr, endUnstartedBrowser(ctx, nil, cdpURL, opts.UserDataDir), killCertProxy(proxy))
 	}
-	eng, err := startEngine(ctx, browser, cdpURL, opts)
-	if err != nil {
-		return nil, errors.Join(err, endUnstartedBrowser(ctx, browser, cdpURL, opts.UserDataDir))
-	}
-	extension, err := browserhost.StagehandExtension(ctx, cdpURL)
-	if err != nil {
-		return nil, errors.Join(fmt.Errorf("locate browser runtime extension: %w", err), eng.Close(context.WithoutCancel(ctx)))
-	}
-	eng.handle.ExtensionID = extension.ID
-	eng.handle.ExtensionDir = extension.Path
-	// Without a process ID, a browser that stops answering cannot be ended.
-	eng.handle.BrowserPID, _ = browserhost.BrowserProcessID(ctx, cdpURL)
-	eng.handle.BrowserStartedAt, _ = procutil.StartTime(eng.handle.BrowserPID)
-	if err := eng.handleDownloads(ctx, opts.DownloadsDir); err != nil {
-		return nil, errors.Join(err, eng.Close(context.WithoutCancel(ctx)))
-	}
-	return eng, nil
+	return startedBrowser{browser: browser, cdpURL: cdpURL, proxy: proxy}, nil
 }
 
 func (stagehandLauncher) Reattach(ctx context.Context, handle browserHandle, opts launchOptions) (engine, error) {
@@ -206,10 +303,54 @@ func (stagehandLauncher) Reattach(ctx context.Context, handle browserHandle, opt
 	// process identifies.
 	eng.handle.BrowserPID = handle.BrowserPID
 	eng.handle.BrowserStartedAt = handle.BrowserStartedAt
+	eng.handle.CertProxy = handle.CertProxy
+	// What the proxy reported before the browser was reattached belongs to
+	// the process that drove it then.
+	_, _ = eng.TakeCertificateEvents(ctx)
 	if err := eng.handleDownloads(ctx, opts.DownloadsDir); err != nil {
 		return nil, errors.Join(err, eng.Close(context.WithoutCancel(ctx)))
 	}
 	return eng, nil
+}
+
+// startCertProxy starts the proxy that presents opts.ClientCertificates for
+// the browser at cdpURL and routes every other request the way this device
+// does.
+func (l stagehandLauncher) startCertProxy(ctx context.Context, cdpURL string, opts launchOptions) (*certproxy.Handle, error) {
+	pac, warnings, err := sysproxy.Detect(ctx, opts.Proxy)
+	if err != nil {
+		return nil, fmt.Errorf("browser.proxy: %w", err)
+	}
+	for _, warning := range warnings {
+		if opts.Warn != nil {
+			opts.Warn(warning)
+		}
+	}
+	start := l.startProxy
+	if start == nil {
+		start = certproxy.Start
+	}
+	proxy, err := start(ctx, cmnconfig.GetConfig(ctx).Paths.Executable, certproxy.Config{
+		Token:      rand.Text(),
+		CDPURL:     cdpURL,
+		SystemPAC:  pac,
+		Entries:    opts.ClientCertificates,
+		TrustedCAs: opts.TrustedCAs,
+		Guard:      opts.Guard,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("start the certificate proxy: %w", err)
+	}
+	return proxy, nil
+}
+
+// killCertProxy ends the certificate proxy of a browser that did not start,
+// if it has one.
+func killCertProxy(proxy *certproxy.Handle) error {
+	if proxy == nil {
+		return nil
+	}
+	return proxy.Kill()
 }
 
 // endUnstartedBrowser ends the browser launched with profileDir at cdpURL
@@ -276,11 +417,18 @@ func startEngine(ctx context.Context, browser *stagehand.Browser, cdpURL string,
 		sink:            sink,
 		handle:          browserHandle{CDPURL: cdpURL},
 		pageCallTimeout: pageCallTimeout,
+		settleWait:      settleTimeout,
+		botCheckWait:    botCheckWait,
 	}
 	// An unanswered dialog blocks its page, and the runtime does not answer
 	// dialogs itself.
 	if eng.dialogs, err = browserhost.WatchDialogs(ctx, cdpURL); err != nil {
 		return nil, errors.Join(fmt.Errorf("watch dialogs: %w", err), eng.release(context.WithoutCancel(ctx)))
+	}
+	// A site that refuses the browser answers with a status or a bot check
+	// the page itself may not show.
+	if eng.responses, err = browserhost.WatchPageResponses(ctx, cdpURL); err != nil {
+		return nil, errors.Join(fmt.Errorf("watch page responses: %w", err), eng.release(context.WithoutCancel(ctx)))
 	}
 	if len(opts.AllowedDomains) > 0 {
 		// Blocked requests leave a broken page and a later, unrelated
@@ -311,11 +459,18 @@ type stagehandEngine struct {
 	// downloads are refused.
 	downloads *browserhost.DownloadWatcher
 	dialogs   *browserhost.DialogWatcher
+	responses *browserhost.PageResponseWatcher
 	// blocked counts requests allowed_domains blocks; nil without
 	// allowed_domains.
 	blocked *browserhost.BlockedRequestWatcher
 	// pageCallTimeout bounds calls that take no timeout of their own.
 	pageCallTimeout time.Duration
+	// settleWait bounds the wait for a document to settle.
+	settleWait time.Duration
+	// botCheckWait bounds the wait for a bot check to pass.
+	botCheckWait time.Duration
+	// certificateEventsSeen is the last certificate proxy event taken.
+	certificateEventsSeen int64
 }
 
 // handleDownloads saves downloads into dir, or refuses them when dir is
@@ -337,7 +492,16 @@ func (e *stagehandEngine) page(ctx context.Context) (*stagehand.Page, error) {
 	if err != nil {
 		return nil, err
 	}
-	return browserContext.ActivePage(ctx)
+	page, err := browserContext.ActivePage(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// The caller's next call writes to the browser runtime, which closes its
+	// connection to the browser when that call's context has ended.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return page, nil
 }
 
 func (e *stagehandEngine) Goto(ctx context.Context, url string, timeout time.Duration) error {
@@ -356,11 +520,16 @@ func (e *stagehandEngine) Goto(ctx context.Context, url string, timeout time.Dur
 }
 
 func (e *stagehandEngine) Act(ctx context.Context, instruction string, variables map[string]string, timeout time.Duration) (actOutcome, error) {
+	// The page before the act identifies the element it acts on, which the
+	// act may rename or remove. Without it, the actions go unidentified.
+	before, beforeErr := e.Snapshot(ctx)
 	e.watch(ctx)
 	result, err := boundCall(ctx, timeout+callTimeoutSlack, func(ctx context.Context) (stagehand.ActResult, error) {
 		return e.client.Act(ctx, stagehand.ActInstruction(instruction), actOptions(variables, timeout))
 	})
 	if lost := sessionLost(result, err); lost != nil {
+		// The act may have loaded a new document before the page was lost.
+		e.settle(ctx)
 		return actOutcome{}, lost
 	}
 	if err != nil {
@@ -381,7 +550,33 @@ func (e *stagehandEngine) Act(ctx context.Context, instruction string, variables
 		}
 		outcome.Actions = append(outcome.Actions, recorded)
 	}
+	if beforeErr == nil {
+		identifyOn(before, outcome.Actions, variables)
+	}
+	if message := uncheckedOption(before, beforeErr, outcome.Actions, variables); outcome.Success && message != "" {
+		outcome.Success, outcome.Message = false, message
+	}
 	return outcome, nil
+}
+
+// uncheckedOption says why an option an action picked is not known to be
+// on its select: snap, the page before the actions ran, shows the select
+// lacks it, or the page could not be read, as snapErr says. It returns ""
+// otherwise. The runtime resets a select told to pick an option it lacks
+// to its first option and reports success.
+func uncheckedOption(snap pageSnapshot, snapErr error, actions []recordedAction, variables map[string]string) string {
+	for _, action := range actions {
+		if action.Method != selectOptionMethod {
+			continue
+		}
+		if snapErr != nil {
+			return "the page could not be read to check the option picked: " + snapErr.Error()
+		}
+		if target, ok := targetOf(snap, action.Selector); ok && !offersOption(target.node(), action, variables) {
+			return fmt.Sprintf("the %s offers no option %q", withName(target.node().role, target.node().name), action.Arguments[0])
+		}
+	}
+	return ""
 }
 
 func (e *stagehandEngine) Replay(ctx context.Context, recorded recordedAction, variables map[string]string, timeout time.Duration) (bool, error) {
@@ -390,6 +585,14 @@ func (e *stagehandEngine) Replay(ctx context.Context, recorded recordedAction, v
 	// dialog, counts as a miss.
 	if !e.targetVisible(ctx, recorded.Selector) {
 		return false, ctx.Err()
+	}
+	// A layout change can put another element at the recorded location,
+	// which the runtime acts on without failing.
+	if recorded.Target != nil || recorded.Method == selectOptionMethod {
+		snap, err := e.Snapshot(ctx)
+		if err != nil || !stillTargets(recorded, snap, variables) {
+			return false, ctx.Err()
+		}
 	}
 	action := stagehand.Action{
 		Selector:    recorded.Selector,
@@ -404,6 +607,8 @@ func (e *stagehandEngine) Replay(ctx context.Context, recorded recordedAction, v
 		return e.client.Act(ctx, stagehand.ObservedAction(action), actOptions(variables, timeout))
 	})
 	if lost := sessionLost(result, err); lost != nil {
+		// The action may have loaded a new document before the page was lost.
+		e.settle(ctx)
 		return false, lost
 	}
 	if err != nil {
@@ -430,18 +635,70 @@ func (e *stagehandEngine) watch(ctx context.Context) {
 	})
 }
 
-// settle waits, up to settleTimeout, for what an action started to finish
-// before the next operation reads the page: a new document until its network
-// is idle, and the document the action began on until its requests end and
-// it stops changing. A page that does not settle in time is left as it is.
+// settle waits for what an action started to finish before the next
+// operation reads the page: for the document it shows to settle, and for a
+// bot check the site answered with to pass.
 func (e *stagehandEngine) settle(ctx context.Context) {
-	ctx, cancel := context.WithTimeout(ctx, settleTimeout)
+	e.settleDocument(ctx, time.Now().Add(e.settleWait))
+	e.awaitBotCheck(ctx)
+}
+
+// awaitBotCheck waits, up to botCheckWait, while the page shows a bot check.
+// A check passes by loading another document, which settles in turn, and
+// may ask again. A check still shown when the wait ends is left to the
+// operations that follow.
+func (e *stagehandEngine) awaitBotCheck(ctx context.Context) {
+	if !e.showsBotCheck(ctx) {
+		return
+	}
+	deadline := time.Now().Add(e.botCheckWait)
+	if !time.Now().Before(deadline) {
+		return
+	}
+	ctx, cancel := waitContext(ctx, deadline)
+	defer cancel()
+	document, _ := e.DocumentID(ctx)
+	for pause(ctx, settlePoll, deadline) {
+		current, err := e.DocumentID(ctx)
+		if err != nil || current == document {
+			continue
+		}
+		settled := time.Now().Add(e.settleWait)
+		if settled.After(deadline) {
+			settled = deadline
+		}
+		e.settleDocument(ctx, settled)
+		if !time.Now().Before(deadline) || !e.showsBotCheck(ctx) {
+			return
+		}
+		document = current
+	}
+}
+
+// showsBotCheck reports whether the page shows a bot check, reading it no
+// longer than a page settles, so a page that does not answer delays nothing.
+func (e *stagehandEngine) showsBotCheck(ctx context.Context) bool {
+	ctx, cancel := context.WithTimeout(ctx, e.settleWait)
+	defer cancel()
+	page, err := e.PageOutcome(ctx)
+	return err == nil && page.BotCheck != ""
+}
+
+// settleDocument waits, until deadline, for the document the page shows to
+// settle: a new document until its network is idle, and the document an
+// action began on until its requests end and it stops changing. A page that
+// does not settle in time is left as it is.
+func (e *stagehandEngine) settleDocument(ctx context.Context, deadline time.Time) {
+	if !time.Now().Before(deadline) {
+		return
+	}
+	ctx, cancel := waitContext(ctx, deadline)
 	defer cancel()
 	page, err := e.page(ctx)
 	if err != nil {
 		return
 	}
-	for {
+	for time.Now().Before(deadline) {
 		quiet, err := page.Evaluate(ctx, quietExpression)
 		if err == nil && string(quiet) == "true" {
 			return
@@ -450,15 +707,36 @@ func (e *stagehandEngine) settle(ctx context.Context) {
 		// reports no quiet state shows a document watch never readied; both
 		// wait as a newly loaded page does.
 		if err != nil || string(quiet) != "false" {
-			_ = page.WaitForLoadState(ctx, stagehand.LoadStateNetworkIdle, new(int(settleTimeout.Milliseconds())))
+			if wait := time.Until(deadline); wait > 0 {
+				_ = page.WaitForLoadState(ctx, stagehand.LoadStateNetworkIdle, new(int(wait.Milliseconds())))
+			}
 			return
 		}
-		select {
-		case <-ctx.Done():
+		if !pause(ctx, settlePoll, deadline) {
 			return
-		case <-time.After(settlePoll):
 		}
 	}
+}
+
+// waitContext returns the context for the page reads of a wait that ends at
+// deadline. A read starts only before the deadline and may take writeGrace
+// past it, so it never writes to the browser runtime on a context that has
+// ended, which closes the runtime's connection to the browser.
+func waitContext(ctx context.Context, deadline time.Time) (context.Context, context.CancelFunc) {
+	return context.WithDeadline(ctx, deadline.Add(writeGrace))
+}
+
+// pause waits up to d, no later than deadline, and reports whether the
+// wait it is part of goes on, which waitContext explains.
+func pause(ctx context.Context, d time.Duration, deadline time.Time) bool {
+	timer := time.NewTimer(min(d, time.Until(deadline)))
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+	}
+	return time.Now().Before(deadline)
 }
 
 // targetVisible reports whether selector, resolved as a replayed action
@@ -478,9 +756,9 @@ func (e *stagehandEngine) targetVisible(ctx context.Context, selector string) bo
 
 // sessionLost returns an error wrapping errPageSessionLost when an act call
 // that returned result and err failed because the page's session was
-// detached, or nil. The runtime reports that detach in a failed result when
-// the action itself failed, and as an RPC error when the work around the
-// action did.
+// detached, or errPageContextLost when its script context was replaced, or
+// nil. The runtime reports that loss in a failed result when the action
+// itself failed, and as an RPC error when the work around the action did.
 func sessionLost(result stagehand.ActResult, err error) error {
 	message := result.Data.Message
 	var rpcErr *stagehand.RPCError
@@ -489,6 +767,9 @@ func sessionLost(result stagehand.ActResult, err error) error {
 		message = rpcErr.Message
 	case err != nil || result.Data.Success:
 		return nil
+	}
+	if strings.Contains(message, contextLostMarker) {
+		return fmt.Errorf("%w: %s", errPageContextLost, message)
 	}
 	for _, marker := range sessionLostMarkers {
 		if strings.Contains(message, marker) {
@@ -529,6 +810,24 @@ func (e *stagehandEngine) Extract(ctx context.Context, instruction string, schem
 		}
 		return result.Data, nil
 	})
+}
+
+func (e *stagehandEngine) Observe(ctx context.Context, instruction string, timeout time.Duration) ([]recordedAction, error) {
+	result, err := boundCall(ctx, timeout+callTimeoutSlack, func(ctx context.Context) (stagehand.ObserveResult, error) {
+		return e.client.Observe(ctx, &instruction, &stagehand.StagehandClientObserveOptions{Timeout: new(float64(timeout.Milliseconds()))})
+	})
+	if err != nil {
+		return nil, err
+	}
+	found := make([]recordedAction, 0, len(result.Data))
+	for _, action := range result.Data {
+		element := recordedAction{Selector: action.Selector, Description: action.Description, Arguments: action.Arguments}
+		if action.Method != nil {
+			element.Method = *action.Method
+		}
+		found = append(found, element)
+	}
+	return found, nil
 }
 
 func (e *stagehandEngine) WaitForSelector(ctx context.Context, selector string, timeout time.Duration) error {
@@ -654,6 +953,61 @@ func (e *stagehandEngine) TakeBlockedRequests() (map[string]int, error) {
 	return e.blocked.Take()
 }
 
+func (e *stagehandEngine) TakeCertificateEvents(ctx context.Context) ([]certproxy.Event, error) {
+	if e.handle.CertProxy == nil {
+		return nil, nil
+	}
+	events, err := boundCall(ctx, e.pageCallTimeout, func(ctx context.Context) ([]certproxy.Event, error) {
+		return certproxy.Events(ctx, e.handle.CertProxy.URL, e.certificateEventsSeen)
+	})
+	if len(events) > 0 {
+		e.certificateEventsSeen = events[len(events)-1].Seq
+	}
+	return events, err
+}
+
+func (e *stagehandEngine) PageOutcome(ctx context.Context) (pageOutcome, error) {
+	raw, err := e.evaluate(ctx, pageOutcomeExpression)
+	if err != nil {
+		return pageOutcome{}, err
+	}
+	var outcome pageOutcome
+	if err := json.Unmarshal(raw, &outcome); err != nil {
+		return pageOutcome{}, fmt.Errorf("read the page: %w", err)
+	}
+	// An error page's title that is not a host name is not the failed
+	// host.
+	if hostpattern.Validate(outcome.Host) != nil || strings.Contains(outcome.Host, "*") {
+		outcome.Host = ""
+	}
+	// The answer the host gave the page tells whether it was a bot check.
+	// An answer of another status was to an earlier page.
+	if e.responses != nil && outcome.Host != "" {
+		if response, ok := e.responses.Response(outcome.Host); ok && response.Status == outcome.Status {
+			outcome.BotCheck = response.BotCheck
+		}
+	}
+	return outcome, nil
+}
+
+func (e *stagehandEngine) PendingConnections(ctx context.Context) ([]certproxy.Pending, error) {
+	if e.handle.CertProxy == nil {
+		return nil, nil
+	}
+	return boundCall(ctx, e.pageCallTimeout, func(ctx context.Context) ([]certproxy.Pending, error) {
+		return certproxy.PendingConnections(ctx, e.handle.CertProxy.URL)
+	})
+}
+
+func (e *stagehandEngine) CertificateVerified(ctx context.Context, host string) (bool, error) {
+	if e.handle.CertProxy == nil {
+		return false, nil
+	}
+	return boundCall(ctx, e.pageCallTimeout, func(ctx context.Context) (bool, error) {
+		return certproxy.Verified(ctx, e.handle.CertProxy.URL, host)
+	})
+}
+
 func (e *stagehandEngine) Handle() browserHandle {
 	return e.handle
 }
@@ -676,8 +1030,14 @@ func (e *stagehandEngine) Detach(ctx context.Context) error {
 	return e.release(ctx)
 }
 
+// Close terminates the browser, and then the proxy that presented its
+// client certificates.
 func (e *stagehandEngine) Close(ctx context.Context) error {
-	return errors.Join(e.release(ctx), closeBrowser(ctx, e.handle.BrowserPID, e.handle.BrowserStartedAt, e.browser.Close))
+	return errors.Join(
+		e.release(ctx),
+		closeBrowser(ctx, e.handle.BrowserPID, e.handle.BrowserStartedAt, e.browser.Close),
+		killCertProxy(e.handle.CertProxy),
+	)
 }
 
 // closeBrowser terminates a launched browser with closeRuntime. The browser's
@@ -732,6 +1092,10 @@ func (e *stagehandEngine) release(ctx context.Context) error {
 		errs = append(errs, e.dialogs.Close())
 		e.dialogs = nil
 	}
+	if e.responses != nil {
+		errs = append(errs, e.responses.Close())
+		e.responses = nil
+	}
 	if e.blocked != nil {
 		errs = append(errs, e.blocked.Close())
 		e.blocked = nil
@@ -754,6 +1118,12 @@ var errBrowserUnresponsive = errors.New("the browser did not respond")
 // boundCall runs call with a deadline of limit and reports when the browser
 // did not answer in time, so an unresponsive page cannot hang the step.
 func boundCall[T any](ctx context.Context, limit time.Duration, call func(context.Context) (T, error)) (T, error) {
+	// A call whose context has ended when it writes to the browser runtime
+	// closes the runtime's connection to the browser.
+	if err := ctx.Err(); err != nil {
+		var zero T
+		return zero, err
+	}
 	callCtx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
 	result, err := call(callCtx)

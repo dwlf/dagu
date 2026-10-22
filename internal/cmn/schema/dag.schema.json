@@ -2807,6 +2807,18 @@
         },
         {
           "if": {
+            "properties": { "action": { "const": "clickhouse.query" } },
+            "required": ["action"]
+          },
+          "then": {
+            "required": ["with"],
+            "properties": {
+              "with": { "$ref": "#/definitions/clickhouseQueryActionConfig" }
+            }
+          }
+        },
+        {
+          "if": {
             "properties": { "action": { "const": "mail.send" } },
             "required": ["action"]
           },
@@ -4700,6 +4712,78 @@
       },
       "description": "SQLite executor configuration for database operations. Uses pure Go SQLite with automatic pragmas: foreign_keys=ON, busy_timeout=5000."
     },
+    "clickhouseQueryActionConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url"],
+      "oneOf": [{ "required": ["query"] }, { "required": ["file"] }],
+      "properties": {
+        "url": {
+          "type": "string",
+          "minLength": 1,
+          "description": "ClickHouse HTTP endpoint, such as http://localhost:8123 or https://host:8443. Must not hold credentials or a query string."
+        },
+        "user": {
+          "type": "string",
+          "description": "ClickHouse user, sent in the X-ClickHouse-User header."
+        },
+        "password": {
+          "type": "string",
+          "description": "Password of the user, sent in the X-ClickHouse-Key header. Use a secret."
+        },
+        "database": {
+          "type": "string",
+          "description": "Default database. A script selects it once with USE, so a USE in the script takes effect for later statements."
+        },
+        "query": {
+          "type": "string",
+          "minLength": 1,
+          "description": "SQL to run. It may hold several statements separated by semicolons; they run in order and the step stops at the first error."
+        },
+        "file": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Path of a .sql file to run instead of query. A relative path is resolved against the step working directory."
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Server-side query parameters. Each entry is bound to the {name:Type} placeholder of the same name."
+        },
+        "settings": {
+          "type": "object",
+          "additionalProperties": {
+            "type": ["string", "number", "boolean"]
+          },
+          "description": "ClickHouse settings applied to every statement, such as readonly: 1 or max_execution_time: 30."
+        },
+        "output_format": {
+          "type": "string",
+          "enum": ["jsonl", "json", "csv"],
+          "default": "jsonl",
+          "description": "Result format for statements without their own FORMAT clause. jsonl is JSONEachRow; json is a JSON array of row objects; csv is CSV."
+        },
+        "headers": {
+          "type": ["boolean", "string"],
+          "description": "Include a header row in CSV output (CSVWithNames). A string is a ${...} reference resolved when the step runs."
+        },
+        "timeout": {
+          "type": ["integer", "string"],
+          "minimum": 0,
+          "default": 60,
+          "description": "Timeout of the whole step in seconds. 0 disables it. Default: 60. A string is a ${...} reference resolved when the step runs."
+        },
+        "tls_skip_verify": {
+          "type": ["boolean", "string"],
+          "description": "Skip verification of the server certificate for https URLs. A string is a ${...} reference resolved when the step runs."
+        },
+        "tls_ca": {
+          "type": "string",
+          "description": "Path to a PEM bundle of additional root CAs trusted for https URLs. A relative path is resolved against the step working directory."
+        }
+      },
+      "description": "Configuration for action: clickhouse.query. Statements run over the ClickHouse HTTP interface. Exactly one of query and file is required."
+    },
     "redisConnectionConfig": {
       "type": "object",
       "properties": {
@@ -6556,13 +6640,13 @@
         },
         "effort": {
           "type": "string",
-          "enum": ["low", "medium", "high", "xhigh"],
-          "description": "Reasoning effort level. Maps to provider-specific settings: low (minimal reasoning), medium (default), high (thorough), xhigh (maximum, OpenAI GPT-5.2+ only)."
+          "enum": ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+          "description": "Reasoning effort level, from least to most: none, minimal, low, medium (default), high, xhigh, max. Each provider maps a level it does not support to its nearest supported one, so a fallback model on another provider still runs. 'none' turns thinking off where the provider allows it."
         },
         "budget_tokens": {
           "type": "integer",
           "minimum": 1,
-          "description": "Explicit token budget for thinking (provider-specific). Anthropic: 1024-128K, Gemini 2.5: 128-32768. Overrides effort-based defaults."
+          "description": "Explicit token budget for thinking (provider-specific). Anthropic: 1024-128K, for models without adaptive thinking such as Claude Haiku 4.5; current Claude models reject it. Gemini 2.5: 128-32768. Overrides effort."
         },
         "include_in_output": {
           "type": "boolean",
@@ -6653,6 +6737,7 @@
             "browser.extract",
             "browser.run",
             "chat.completion",
+            "clickhouse.query",
             "computer.extract",
             "computer.run",
             "container.run",
@@ -7554,10 +7639,11 @@
           "items": { "$ref": "#/definitions/browserOperation" },
           "description": "Operations run in order in one browser session."
         },
+        "ai": { "$ref": "#/definitions/browserAI" },
         "cache": {
           "type": "boolean",
           "default": true,
-          "description": "Record the act operations of a step that succeeds and replay them on later runs without a model call."
+          "description": "Set false to ask the model every run, the same as ai: every_run. Set ai or cache, not both."
         },
         "llm": {
           "$ref": "#/definitions/standardLLMConfig",
@@ -7568,6 +7654,12 @@
       },
       "description": "Configuration for action: browser.run. Extract operations publish their schema fields as step outputs."
     },
+    "browserAI": {
+      "type": "string",
+      "enum": ["every_run", "on_miss", "never"],
+      "default": "on_miss",
+      "description": "How much the model decides for act operations and uploads with into: every_run asks it every run; on_miss replays the acts and uploads of a step that succeeded while the page shows their elements and lets the model repair a replay that fails; never replays only, fails the step when there is no recording or a replay fails, and needs no llm when nothing in the step can call the model. A step under never refuses extract and statement conditions."
+    },
     "browserOptions": {
       "type": "object",
       "additionalProperties": false,
@@ -7575,7 +7667,7 @@
         "headless": {
           "type": "boolean",
           "default": true,
-          "description": "Run Chrome without a window."
+          "description": "Run Chrome without a window. Pages see the user agent the same Chrome sends with one, and a screen that holds the window."
         },
         "executable": {
           "type": "string",
@@ -7612,9 +7704,57 @@
           "type": "string",
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
           "description": "Persistent profile name. Cookies and storage are kept across runs; runs sharing a profile wait for each other."
+        },
+        "client_certificates": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/browserClientCertificate" },
+          "description": "TLS client certificates presented to the hosts each names, before those in the Dagu config. The first entry whose hosts match is used."
         }
       },
       "description": "Browser launch options."
+    },
+    "browserClientCertificate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hosts"],
+      "properties": {
+        "hosts": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Hosts the certificate is presented to: a host name or IP address, *.example.com for the subdomains of example.com, or * for every host."
+        },
+        "pfx_file": {
+          "type": "string",
+          "minLength": 1,
+          "description": "PKCS#12 (.pfx or .p12) file holding the certificate, its private key, and optionally its chain. Relative to the step's working directory."
+        },
+        "cert_file": {
+          "type": "string",
+          "minLength": 1,
+          "description": "PEM certificate, followed by its chain. Used with key_file instead of pfx_file."
+        },
+        "key_file": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Unencrypted PEM private key for cert_file."
+        },
+        "ca_file": {
+          "type": "string",
+          "minLength": 1,
+          "description": "PEM certificates to trust for these hosts' servers, in addition to the system's."
+        },
+        "passphrase": {
+          "type": "string",
+          "description": "Passphrase of pfx_file. Reference a secret, such as ${env.CERT_PASSPHRASE}."
+        },
+        "passphrase_file": {
+          "type": "string",
+          "minLength": 1,
+          "description": "File holding the passphrase of pfx_file."
+        }
+      },
+      "description": "A TLS client certificate and the hosts it is presented to."
     },
     "browserVariables": {
       "type": "object",
@@ -7676,6 +7816,7 @@
       "oneOf": [
         { "required": ["goto"] },
         { "required": ["act"] },
+        { "required": ["upload"] },
         { "required": ["extract"] },
         { "required": ["expect"] },
         { "required": ["wait"] },
@@ -7697,14 +7838,50 @@
               "required": ["instruction"],
               "properties": {
                 "instruction": { "type": "string", "minLength": 1 },
+                "ai": {
+                  "$ref": "#/definitions/browserAI",
+                  "description": "How much the model decides for this act, in place of with.ai."
+                },
                 "cache": {
                   "type": "boolean",
-                  "description": "Set false to disable the replay cache for this operation. Has no effect when with.cache is false."
+                  "description": "Set false to ask the model every run for this act, the same as ai: every_run. Set ai or cache, not both."
                 }
               }
             }
           ],
           "description": "Perform an action described in natural language, such as clicking or typing. Reference variables as %name%."
+        },
+        "upload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["files"],
+          "properties": {
+            "files": {
+              "oneOf": [
+                { "type": "string", "minLength": 1 },
+                {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": { "type": "string", "minLength": 1 }
+                }
+              ],
+              "description": "Files to upload, each up to 50 MB: a path or glob pattern relative to the step's working directory, several one per line, or a value an earlier step published as a JSON list of paths, of objects with a path, or of mail.search emails, whose saved attachments are uploaded."
+            },
+            "into": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The file input, or the button or drop area that opens the file picker, in plain words. The model finds it once and later runs replay it. Leave it out when the page has only one file input."
+            },
+            "ai": {
+              "$ref": "#/definitions/browserAI",
+              "description": "How much the model decides for finding into, in place of with.ai."
+            },
+            "cache": {
+              "type": "boolean",
+              "description": "Set false to ask the model every run for into, the same as ai: every_run. Set ai or cache, not both."
+            }
+          },
+          "description": "Give local files to a file input of the page. The model sees the into text and the page, never the files."
         },
         "extract": {
           "type": "object",
@@ -7777,7 +7954,7 @@
           "description": "Maximum time for this operation, such as 30s. Defaults to 2m."
         }
       },
-      "description": "One browser operation. Set exactly one of goto, act, extract, expect, wait, screenshot, or ask."
+      "description": "One browser operation. Set exactly one of goto, act, upload, extract, expect, wait, screenshot, or ask."
     },
     "computerExtractActionConfig": {
       "type": "object",
@@ -7970,9 +8147,11 @@
             "dy": { "type": "integer" }
           }
         },
-        "wait": { "type": "string", "minLength": 1, "description": "A time to pause, such as 1s." }
+        "wait": { "type": "string", "minLength": 1, "description": "A time to pause, such as 1s." },
+        "focus": { "$ref": "#/definitions/computerSelector", "description": "With key: the element to focus before pressing the keys." }
       },
-      "description": "One pinned step of an act: exactly one of click, double_click, right_click (a selector), type (into, text), key (a chord), scroll (on, dy), or wait."
+      "dependencies": { "focus": ["key"] },
+      "description": "One pinned step of an act: exactly one of click, double_click, right_click (a selector), type (into, text), key (a chord, with an optional focus), scroll (on, dy), or wait."
     },
     "computerPinnedField": {
       "type": "object",

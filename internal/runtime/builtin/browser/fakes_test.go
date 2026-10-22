@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/dagucloud/dagu/v2/internal/browserhost/certproxy"
 	llmpkg "github.com/dagucloud/dagu/v2/internal/llm"
 	"github.com/dagucloud/dagu/v2/internal/runtime/builtin/internal/agentstep"
 )
@@ -77,6 +78,9 @@ type fakeEngine struct {
 	// replayLosesPage is how many of the next replayed actions lose the
 	// connection to the page after their click lands.
 	replayLosesPage int
+	// pageLoss, if set, is how acts and replays that lose the page report it
+	// in place of errFakeSessionLost.
+	pageLoss error
 	// onAct runs while an act asks the model, for what happens meanwhile.
 	onAct func()
 	// actDialogs are the dialogs the next act opens and the browser accepts.
@@ -88,6 +92,14 @@ type fakeEngine struct {
 	blocked    map[string]int
 	// blockedErr is the error every blocked-request count reports.
 	blockedErr error
+	// certificateEvents are what the certificate proxy reports next.
+	certificateEvents []certproxy.Event
+	// outcome is what the browser shows after a page opened.
+	outcome pageOutcome
+	// pending are the connections the certificate proxy waits on.
+	pending []certproxy.Pending
+	// verifiedHosts are the hosts the certificate proxy vouches for.
+	verifiedHosts []string
 	// pageText and visible describe the page that fixed checks read.
 	pageText string
 	visible  []string
@@ -98,9 +110,16 @@ type fakeEngine struct {
 	downloadErr error
 	// downloadWaits records the timeout of each download wait.
 	downloadWaits []time.Duration
-	mu            sync.Mutex
-	generate      generateFunc
-	url           string
+	// uploadHow is how uploads report the files reached the page;
+	// uploadDirect when unset.
+	uploadHow string
+	// uploadErr, if set, is what uploads report in place of giving the
+	// files.
+	uploadErr error
+	uploads   []fakeUpload
+	mu        sync.Mutex
+	generate  generateFunc
+	url       string
 	// loads counts the documents the page has loaded.
 	loads    int
 	acts     []fakeAct
@@ -112,6 +131,13 @@ type fakeEngine struct {
 type fakeAct struct {
 	instruction string
 	variables   map[string]string
+}
+
+// fakeUpload is an upload the page was given: the element, or "" for the
+// page's only file input, and the files' paths.
+type fakeUpload struct {
+	selector string
+	paths    []string
 }
 
 func newFakeEngine() *fakeEngine {
@@ -141,6 +167,32 @@ func (e *fakeEngine) TakeBlockedRequests() (map[string]int, error) {
 	return blocked, e.blockedErr
 }
 
+func (e *fakeEngine) TakeCertificateEvents(context.Context) ([]certproxy.Event, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	events := e.certificateEvents
+	e.certificateEvents = nil
+	return events, nil
+}
+
+func (e *fakeEngine) PageOutcome(context.Context) (pageOutcome, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.outcome, nil
+}
+
+func (e *fakeEngine) PendingConnections(context.Context) ([]certproxy.Pending, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.pending, nil
+}
+
+func (e *fakeEngine) CertificateVerified(_ context.Context, host string) (bool, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return slices.Contains(e.verifiedHosts, host), nil
+}
+
 func (e *fakeEngine) Goto(_ context.Context, url string, _ time.Duration) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -158,6 +210,10 @@ func (e *fakeEngine) load(url string) {
 // page session was detached.
 var errFakeSessionLost = fmt.Errorf("%w: Failed to perform act: -32001 Session with given id not found.", errPageSessionLost)
 
+// errFakeContextLost is how the browser runtime reports an operation whose
+// script context a new document replaced.
+var errFakeContextLost = fmt.Errorf("%w: Failed to perform act: -32000 Cannot find context with specified id", errPageContextLost)
+
 func (e *fakeEngine) Act(ctx context.Context, instruction string, variables map[string]string, _ time.Duration) (actOutcome, error) {
 	e.mu.Lock()
 	e.acts = append(e.acts, fakeAct{instruction: instruction, variables: maps.Clone(variables)})
@@ -168,7 +224,7 @@ func (e *fakeEngine) Act(ctx context.Context, instruction string, variables map[
 	e.actDialogs = nil
 	e.blocked, e.actBlocked = e.actBlocked, nil
 	generate, onAct, twoStep, fills := e.generate, e.onAct, e.twoStepAct, e.actFills
-	losesPage := e.actLosesPage > 0
+	losesPage, pageLoss := e.actLosesPage > 0, cmp.Or(e.pageLoss, errFakeSessionLost)
 	if losesPage {
 		e.actLosesPage--
 	}
@@ -192,7 +248,7 @@ func (e *fakeEngine) Act(ctx context.Context, instruction string, variables map[
 		return actOutcome{Message: "Failed to perform act: No action found"}, nil
 	}
 	if losesPage {
-		return actOutcome{}, errFakeSessionLost
+		return actOutcome{}, pageLoss
 	}
 	actions := []recordedAction{{Selector: "xpath=" + choice.ElementID, Method: "click"}}
 	if fills != "" {
@@ -216,7 +272,7 @@ func (e *fakeEngine) Replay(_ context.Context, action recordedAction, _ map[stri
 	}
 	if e.replayLosesPage > 0 {
 		e.replayLosesPage--
-		return false, errFakeSessionLost
+		return false, cmp.Or(e.pageLoss, errFakeSessionLost)
 	}
 	return !e.replayFails, nil
 }
@@ -237,6 +293,56 @@ func (e *fakeEngine) Extract(ctx context.Context, instruction string, schema jso
 		return nil, err
 	}
 	return resp.JSON, nil
+}
+
+// Observe asks the model for the elements an instruction describes, as the
+// browser runtime does.
+func (e *fakeEngine) Observe(ctx context.Context, instruction string, _ time.Duration) ([]recordedAction, error) {
+	e.mu.Lock()
+	generate := e.generate
+	e.mu.Unlock()
+	resp, err := generate(ctx, generateRequest{
+		SchemaName: "Observation",
+		Schema:     json.RawMessage(`{"type":"object","properties":{"elements":{"type":"array"}}}`),
+		Messages:   []generateMessage{{Role: "user", Text: "instruction: " + instruction}},
+	})
+	if err != nil {
+		return nil, err
+	}
+	var answer struct {
+		Elements []struct {
+			ElementID   string `json:"elementId"`
+			Description string `json:"description"`
+		} `json:"elements"`
+	}
+	if err := json.Unmarshal(resp.JSON, &answer); err != nil {
+		return nil, err
+	}
+	found := make([]recordedAction, 0, len(answer.Elements))
+	for _, element := range answer.Elements {
+		found = append(found, recordedAction{Selector: "xpath=" + element.ElementID, Description: element.Description, Method: "click"})
+	}
+	return found, nil
+}
+
+func (e *fakeEngine) Upload(_ context.Context, selector string, files []uploadFile, _ time.Duration) (string, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	paths := make([]string, 0, len(files))
+	for _, file := range files {
+		paths = append(paths, file.Path)
+	}
+	e.uploads = append(e.uploads, fakeUpload{selector: selector, paths: paths})
+	if e.uploadErr != nil {
+		return "", e.uploadErr
+	}
+	return cmp.Or(e.uploadHow, uploadDirect), nil
+}
+
+func (e *fakeEngine) uploaded() []fakeUpload {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return slices.Clone(e.uploads)
 }
 
 func (e *fakeEngine) WaitForSelector(context.Context, string, time.Duration) error {
@@ -374,6 +480,9 @@ func pageModel(extracts map[string]string, trueStatements ...string) func(req *l
 		properties, _ := req.Tools[0].Function.Parameters["properties"].(map[string]any)
 		if _, ok := properties["elementId"]; ok {
 			return `{"elementId":"/html/body/button"}`, nil
+		}
+		if _, ok := properties["elements"]; ok {
+			return `{"elements":[{"elementId":"/html/body/button","description":"Upload button"}]}`, nil
 		}
 		if _, ok := properties["answer"]; ok {
 			for _, statement := range trueStatements {

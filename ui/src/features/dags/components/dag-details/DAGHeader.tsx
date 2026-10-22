@@ -1,29 +1,23 @@
 // Copyright (C) 2026 Yota Hamada
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-import {
-  Calendar,
-  Check,
-  Copy,
-  Link2,
-  RefreshCw,
-  Server,
-  Timer,
-} from 'lucide-react';
+import { Check, Copy, Link2 } from 'lucide-react';
+import { RefreshButton } from '@/components/ui/refresh-button';
 import React, { useCallback, useEffect } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { components, Status } from '../../../../api/v1/schema';
+import { useRemoteNode } from '@/contexts/RemoteNodeContext';
+import { buildDAGRunPageURL } from '@/features/dag-runs/lib/dagRunUrls';
+import { components } from '../../../../api/v1/schema';
 import { useConfig } from '../../../../contexts/ConfigContext';
-import dayjs from '../../../../lib/dayjs';
 import { useCopyFeedback } from '@/hooks/useCopyFeedback';
 import StatusChip from '@/components/ui/status-chip';
 import AutoRetryBadge from '../../../dag-runs/components/common/AutoRetryBadge';
+import { RunMetaLine } from '../../../dag-runs/components/common/RunMetaLine';
 import { workspaceNameFromLabels } from '../../../../lib/workspace';
 import { RootDAGRunContext } from '../../contexts/RootDAGRunContext';
 import { DAGActions } from '../common';
 import DAGPinButton from './DAGPinButton';
 import { I18nText } from '@/i18n/I18nText';
-import { I18nProps } from '@/i18n/I18nProps';
 import { useI18n } from '@/i18n/I18nProvider';
 
 interface DAGHeaderProps {
@@ -31,7 +25,6 @@ interface DAGHeaderProps {
   currentDAGRun?: components['schemas']['DAGRunDetails'];
   fileName: string;
   refreshFn: () => void;
-  formatDuration: (startDate: string, endDate: string) => string;
   buildScopedUrl?: (path: string) => string;
   /** Whether the DAG is pinned; the pin button is hidden when unknown. */
   pinned?: boolean;
@@ -44,17 +37,15 @@ const DAGHeader: React.FC<DAGHeaderProps> = ({
   currentDAGRun,
   fileName,
   refreshFn,
-  formatDuration,
   buildScopedUrl,
   pinned,
   onPinnedChange,
 }) => {
   const { ts } = useI18n();
   const navigate = useNavigate();
+  const remoteNode = useRemoteNode();
   const params = useParams<{ tab?: string }>();
   const rootDAGRunContext = React.useContext(RootDAGRunContext);
-  const [isRefreshing, setIsRefreshing] = React.useState(false);
-  const [currentDuration, setCurrentDuration] = React.useState<string>('--');
   const { copied: nameCopied, copy: copyName } = useCopyFeedback();
   const { copied: linkCopied, copy: copyLink } = useCopyFeedback();
   const config = useConfig();
@@ -79,76 +70,36 @@ const DAGHeader: React.FC<DAGHeaderProps> = ({
   const description =
     displayName === dag.name ? dag.description?.trim() : undefined;
 
-  // Calculate duration between start and end times
-  const calculateDuration = React.useCallback(() => {
-    if (!dagRunToDisplay?.startedAt || dagRunToDisplay.startedAt === '-') {
-      return '--';
-    }
+  // Ancestor runs open on the run page, the one place a run is selected.
+  const rootRunURL =
+    dagRunToDisplay?.rootDAGRunId && dagRunToDisplay.rootDAGRunName
+      ? buildDAGRunPageURL({
+          rootDAGRunName: dagRunToDisplay.rootDAGRunName,
+          rootDAGRunId: dagRunToDisplay.rootDAGRunId,
+          remoteNode,
+        })
+      : undefined;
+  const parentRunURL =
+    dagRunToDisplay?.parentDAGRunId &&
+    dagRunToDisplay.rootDAGRunId &&
+    dagRunToDisplay.rootDAGRunName
+      ? buildDAGRunPageURL({
+          rootDAGRunName: dagRunToDisplay.rootDAGRunName,
+          rootDAGRunId: dagRunToDisplay.rootDAGRunId,
+          subDAGRunId: dagRunToDisplay.parentDAGRunId,
+          remoteNode,
+        })
+      : undefined;
 
-    const end =
-      dagRunToDisplay.finishedAt && dagRunToDisplay.finishedAt !== '-'
-        ? dagRunToDisplay.finishedAt
-        : dayjs().toISOString();
-
-    return formatDuration(dagRunToDisplay.startedAt, end);
-  }, [dagRunToDisplay?.startedAt, dagRunToDisplay?.finishedAt, formatDuration]);
-
-  // Determine if the DAG is currently running
-  const isRunning = dagRunToDisplay?.status === Status.Running;
-
-  // Auto-update duration every second for running DAGs
-  useEffect(() => {
-    if (isRunning && dagRunToDisplay?.startedAt) {
-      // Initial calculation
-      setCurrentDuration(calculateDuration());
-
-      // Set up interval to update duration every second
-      const intervalId = setInterval(() => {
-        setCurrentDuration(calculateDuration());
-      }, 1000);
-
-      // Clean up interval on unmount or when status changes
-      return () => clearInterval(intervalId);
-    } else {
-      // For non-running DAGs, calculate once
-      setCurrentDuration(calculateDuration());
-    }
-  }, [isRunning, dagRunToDisplay?.startedAt, dagRunToDisplay?.finishedAt]);
-
-  const handleRootDAGRunClick = (e: React.MouseEvent) => {
+  const handleRunLinkClick = (e: React.MouseEvent, url?: string) => {
+    if (!url || e.metaKey || e.ctrlKey) return;
     e.preventDefault();
-    if (!dagRunToDisplay) return;
-    if (!dagRunToDisplay.rootDAGRunId || !dagRunToDisplay.rootDAGRunName) {
-      return;
-    }
-    const searchParams = new URLSearchParams();
-    searchParams.set('dagRunId', dagRunToDisplay.rootDAGRunId);
-    searchParams.set('dagRunName', dagRunToDisplay.rootDAGRunName);
-    navigate(scopedUrl(`/dags/${fileName}?${searchParams.toString()}`));
+    navigate(url);
   };
 
-  const handleParentDAGRunClick = (e: React.MouseEvent) => {
-    e.preventDefault();
-    if (!dagRunToDisplay) return;
-    if (
-      !dagRunToDisplay.parentDAGRunId ||
-      !dagRunToDisplay.rootDAGRunId ||
-      !dagRunToDisplay.rootDAGRunName
-    ) {
-      return;
-    }
-    const searchParams = new URLSearchParams();
-    searchParams.set('subDAGRunId', dagRunToDisplay.parentDAGRunId);
-    searchParams.set('dagRunId', dagRunToDisplay.rootDAGRunId);
-    searchParams.set('dagRunName', dagRunToDisplay.rootDAGRunName);
-    navigate(scopedUrl(`/dags/${fileName}?${searchParams.toString()}`));
-  };
-
-  const handleRefresh = () => {
-    setIsRefreshing(true);
-    refreshFn();
-    setTimeout(() => setIsRefreshing(false), 600);
-  };
+  const handleRefresh = useCallback(() => {
+    void refreshFn();
+  }, [refreshFn]);
 
   // Add keyboard shortcut for refresh
   useEffect(() => {
@@ -195,7 +146,7 @@ const DAGHeader: React.FC<DAGHeaderProps> = ({
     dagRunToDisplay.dagRunId === dagRunToDisplay.rootDAGRunId;
 
   return (
-    <div className="min-w-0 rounded-xl border border-border bg-card p-4 shadow-sm sm:rounded-2xl sm:p-6">
+    <div className="min-w-0">
       {/* Header with title and actions */}
       <div className="mb-4 flex min-w-0 flex-col items-stretch gap-4 sm:flex-row sm:items-start sm:justify-between sm:gap-6">
         <div className="flex-1 min-w-0">
@@ -207,10 +158,8 @@ const DAGHeader: React.FC<DAGHeaderProps> = ({
                 dagRunToDisplay.rootDAGRunId !== dagRunToDisplay.dagRunId && (
                   <>
                     <a
-                      href={scopedUrl(
-                        `/dags/${fileName}?dagRunId=${encodeURIComponent(dagRunToDisplay.rootDAGRunId)}&dagRunName=${encodeURIComponent(dagRunToDisplay.rootDAGRunName)}`
-                      )}
-                      onClick={handleRootDAGRunClick}
+                      href={rootRunURL}
+                      onClick={(e) => handleRunLinkClick(e, rootRunURL)}
                       className="text-primary hover:text-primary hover:underline transition-colors font-medium"
                     >
                       {dagRunToDisplay.rootDAGRunName}
@@ -228,10 +177,8 @@ const DAGHeader: React.FC<DAGHeaderProps> = ({
                 dagRunToDisplay.parentDAGRunName !== dagRunToDisplay.name && (
                   <>
                     <a
-                      href={scopedUrl(
-                        `/dags/${fileName}?dagRunId=${encodeURIComponent(dagRunToDisplay.rootDAGRunId)}&subDAGRunId=${encodeURIComponent(dagRunToDisplay.parentDAGRunId)}&dagRunName=${encodeURIComponent(dagRunToDisplay.rootDAGRunName)}`
-                      )}
-                      onClick={handleParentDAGRunClick}
+                      href={parentRunURL}
+                      onClick={(e) => handleRunLinkClick(e, parentRunURL)}
                       className="text-primary hover:text-primary hover:underline transition-colors font-medium"
                     >
                       {dagRunToDisplay.parentDAGRunName}
@@ -243,7 +190,7 @@ const DAGHeader: React.FC<DAGHeaderProps> = ({
           )}
 
           <div className="flex min-w-0 items-center gap-2">
-            <h1 className="min-w-0 break-words text-2xl font-bold text-foreground sm:truncate">
+            <h1 className="min-w-0 break-words text-2xl font-semibold tracking-[-0.01em] text-foreground sm:truncate">
               {displayName}
             </h1>
             {displayName && (
@@ -320,6 +267,7 @@ const DAGHeader: React.FC<DAGHeaderProps> = ({
 
         {showActions && (
           <div className="flex min-w-0 flex-wrap items-center gap-2 sm:flex-shrink-0 sm:justify-end">
+            {dagRunToDisplay && <RefreshButton onRefresh={refreshFn} />}
             <DAGActions
               status={dagRunToDisplay}
               dag={dag}
@@ -345,51 +293,7 @@ const DAGHeader: React.FC<DAGHeaderProps> = ({
               limit={dagRunToDisplay.autoRetryLimit}
             />
 
-            <I18nProps>
-              <button
-                onClick={handleRefresh}
-                disabled={isRefreshing}
-                className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium rounded-md text-muted-foreground hover:text-foreground hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed transition-all"
-                title="Refresh (R)"
-              >
-                <RefreshCw
-                  className={`h-3 w-3 ${isRefreshing ? 'animate-spin' : ''}`}
-                />
-                <span>
-                  <I18nText text={'Refresh'} />
-                </span>
-              </button>
-            </I18nProps>
-
-            <span className="flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
-              <Calendar className="h-3 w-3" />
-              <span className="truncate">
-                {dagRunToDisplay?.startedAt
-                  ? dayjs(dagRunToDisplay.startedAt).format('MMM D, HH:mm:ss')
-                  : '--'}
-              </span>
-            </span>
-
-            <span className="flex items-center gap-1 text-xs text-muted-foreground">
-              <Timer className="h-3 w-3" />
-              {currentDuration}
-              {isRunning && (
-                <span className="inline-block w-1.5 h-1.5 rounded-full bg-[#66ff66]" />
-              )}
-            </span>
-
-            {dagRunToDisplay.workerId && (
-              <span className="flex items-center gap-1 text-xs text-muted-foreground">
-                <Server className="h-3 w-3" />
-                <span className="min-w-0 truncate font-mono">
-                  {dagRunToDisplay.workerId}
-                </span>
-              </span>
-            )}
-
-            <code className="max-w-full break-all text-xs font-mono text-muted-foreground sm:max-w-xs sm:truncate">
-              {dagRunToDisplay.rootDAGRunId}
-            </code>
+            <RunMetaLine dagRun={dagRunToDisplay} />
           </div>
         )}
     </div>

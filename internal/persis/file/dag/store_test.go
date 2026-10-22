@@ -1486,6 +1486,48 @@ steps:
 	require.Equal(t, 1, cache.Size())
 }
 
+// A workspace directory reached through a symlink is read through the link,
+// so editing its base config must refresh cached metadata too.
+func TestGetMetadataRefreshesCacheWhenSymlinkedWorkspaceBaseConfigChanges(t *testing.T) {
+	rootDir := t.TempDir()
+	dagDir := filepath.Join(rootDir, "dags")
+	workspaceConfigDir := filepath.Join(rootDir, "workspaces")
+	targetDir := filepath.Join(rootDir, "ops-config")
+	require.NoError(t, os.MkdirAll(dagDir, 0750))
+	require.NoError(t, os.MkdirAll(workspaceConfigDir, 0750))
+	require.NoError(t, os.MkdirAll(targetDir, 0750))
+	if err := os.Symlink(targetDir, filepath.Join(workspaceConfigDir, "ops")); err != nil {
+		t.Skipf("symlink creation is unavailable: %v", err)
+	}
+	workspaceBaseConfig := filepath.Join(targetDir, "base.yaml")
+	require.NoError(t, os.WriteFile(workspaceBaseConfig, []byte("max_active_steps: 1\n"), 0600))
+
+	store := newRepository(
+		dagDir,
+		WithWorkspaceBaseConfigDir(workspaceConfigDir),
+		WithFileCache(fileutil.NewCache[*ir.DAG]("dag_definition", 16, time.Hour)),
+		WithSkipExamples(true),
+	)
+	ctx := context.Background()
+	require.NoError(t, os.WriteFile(filepath.Join(dagDir, "linked-workspace.yaml"), []byte(`labels:
+  - workspace=ops
+steps:
+  - name: step1
+    run: echo "hello"
+`), 0600))
+
+	dag, err := store.GetMetadata(ctx, "linked-workspace")
+	require.NoError(t, err)
+	require.Equal(t, 1, dag.MaxActiveSteps)
+
+	time.Sleep(10 * time.Millisecond)
+	require.NoError(t, os.WriteFile(workspaceBaseConfig, []byte("max_active_steps: 2\n"), 0600))
+
+	reloaded, err := store.GetMetadata(ctx, "linked-workspace")
+	require.NoError(t, err)
+	require.Equal(t, 2, reloaded.MaxActiveSteps)
+}
+
 func TestListRebuildsIndexWhenBaseConfigChanges(t *testing.T) {
 	rootDir := t.TempDir()
 	dagDir := filepath.Join(rootDir, "dags")
@@ -1575,6 +1617,58 @@ steps:
 	indexInfoAfter, err := os.Stat(indexPath)
 	require.NoError(t, err)
 	require.True(t, indexInfoAfter.ModTime().After(indexInfoBefore.ModTime()))
+}
+
+// The base config may live inside the DAG directory; it applies to every DAG
+// but must not be listed as one.
+func TestListExcludesBaseConfigInDAGDir(t *testing.T) {
+	baseConfigYAML := []byte(`actions:
+  greet:
+    input_schema:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
+    template:
+      run: echo "{{ .input.message }}"
+`)
+	greetYAML := []byte(`steps:
+  - action: greet
+    with:
+      message: hello
+`)
+
+	for _, tc := range []struct {
+		name       string
+		recursive  bool
+		baseRelDir string
+	}{
+		{name: "Flat", baseRelDir: "."},
+		{name: "Recursive", recursive: true, baseRelDir: "shared"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dagDir := t.TempDir()
+			baseConfig := filepath.Join(dagDir, tc.baseRelDir, "base.yaml")
+			require.NoError(t, os.MkdirAll(filepath.Dir(baseConfig), 0750))
+			require.NoError(t, os.WriteFile(baseConfig, baseConfigYAML, 0600))
+			require.NoError(t, os.WriteFile(filepath.Join(dagDir, "greet.yaml"), greetYAML, 0600))
+
+			store := newRepository(
+				dagDir,
+				WithBaseConfig(baseConfig),
+				WithRecursiveDiscovery(tc.recursive),
+				WithSkipExamples(true),
+			)
+
+			result, errList, err := store.List(context.Background(), persis.DAGListOptions{})
+			require.NoError(t, err)
+			require.Empty(t, errList)
+			require.Len(t, result.Items, 1)
+			require.Equal(t, "greet", result.Items[0].Name)
+			require.Empty(t, result.Items[0].BuildErrors)
+		})
+	}
 }
 
 func TestListWithPagination(t *testing.T) {

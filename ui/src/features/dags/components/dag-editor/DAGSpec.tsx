@@ -61,6 +61,7 @@ import SpecViewSwitcher from './SpecViewSwitcher';
 import { I18nText } from '@/i18n/I18nText';
 import { I18nProps } from '@/i18n/I18nProps';
 import { useI18n } from '@/i18n/I18nProvider';
+import { useScrollFade } from '@/hooks/useScrollFade';
 
 /** Narrowest spec tab, in pixels, that shows the graph beside the editor. */
 const SPLIT_VIEW_MIN_WIDTH = 1024;
@@ -84,6 +85,7 @@ type Props = {
  * including visualization, attributes, steps, and YAML definition
  */
 function DAGSpec({ fileName, localDags, editorHints }: Props) {
+  const [localTabRowRef, localTabRowFade] = useScrollFade<HTMLDivElement>('x');
   const { ts } = useI18n();
   const remoteNode = useRemoteNode();
   const client = useClient();
@@ -585,7 +587,11 @@ function DAGSpec({ fileName, localDags, editorHints }: Props) {
 
   const localDagTabs = hasLocalDags ? (
     <div className="flex-shrink-0">
-      <div className="overflow-x-auto -mx-2 px-2 scrollbar-thin scrollbar-thumb-gray-300">
+      <div
+        ref={localTabRowRef}
+        style={localTabRowFade}
+        className="overflow-x-auto -mx-2 px-2 scrollbar-thin scrollbar-thumb-gray-300"
+      >
         <Tabs className="w-max min-w-full">
           <Tab
             isActive={activeTab === 'parent'}
@@ -664,11 +670,12 @@ function DAGSpec({ fileName, localDags, editorHints }: Props) {
                 <BorderedBox
                   className={
                     fillGraph
-                      ? 'flex min-h-0 flex-1 flex-col p-4'
-                      : 'py-4 px-4 flex flex-col overflow-x-auto'
+                      ? 'flex min-h-0 flex-1 flex-col gap-0 overflow-hidden p-0'
+                      : 'flex flex-col gap-0 overflow-x-auto p-0'
                   }
                 >
                   <Graph
+                    toolbarStart={<GraphInteractionsHint inspect />}
                     steps={dag.steps}
                     name={dag.name}
                     type="config"
@@ -679,7 +686,6 @@ function DAGSpec({ fileName, localDags, editorHints }: Props) {
                     height={fillGraph ? '100%' : undefined}
                   />
                 </BorderedBox>
-                <GraphInteractionsHint className="mt-2" inspect />
               </div>
             )}
 
@@ -794,6 +800,7 @@ function DAGSpec({ fileName, localDags, editorHints }: Props) {
                 <I18nProps>
                   <Button
                     id="save-config"
+                    variant="primary"
                     title="Save changes (Ctrl+S / Cmd+S)"
                     disabled={isSaving || !localHasUnsavedChanges}
                     onClick={async () => {

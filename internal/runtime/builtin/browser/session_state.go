@@ -55,6 +55,8 @@ type sessionState struct {
 type sessionPage struct {
 	URL   string `json:"url"`
 	Title string `json:"title"`
+	// Refused is the refusal the page showed, if any.
+	Refused *refusal `json:"refused,omitempty"`
 }
 
 type sessionUsage struct {
@@ -203,7 +205,7 @@ func parseSessionOperation(raw json.RawMessage) (operation, error) {
 
 // needsModel reports whether the operation asks the model.
 func (o operation) needsModel() bool {
-	return o.Act != nil || o.Extract != nil ||
+	return o.Act != nil || o.Extract != nil || (o.Upload != nil && o.Upload.Into != "") ||
 		(o.Expect != nil && o.Expect.judged()) || (o.When != nil && o.When.judged())
 }
 

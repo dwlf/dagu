@@ -37,7 +37,6 @@ import React, {
 import { Link, useNavigate } from 'react-router-dom';
 import { DAGNameInputModal } from '@/components/DAGNameInputModal';
 import { components, Status } from '../../../../api/v1/schema';
-import type { Config } from '../../../../contexts/ConfigContext';
 import dayjs from '../../../../lib/dayjs';
 import {
   getScheduleKey,
@@ -48,28 +47,12 @@ import RelativeTime from '@/components/ui/relative-time';
 import StatusChip from '@/components/ui/status-chip';
 import Ticker from '@/components/ui/ticker';
 import VisuallyHidden from '@/components/ui/visually-hidden';
-import { CreateDAGModal, DAGPagination } from '../common';
+import { CreateDAGButton, DAGPagination } from '../common';
 import DAGActions from '../common/DAGActions';
 import LiveSwitch from '../common/LiveSwitch';
 import PinToggle from '../common/PinToggle';
-
-declare const getConfig: () => Config;
-
-// Helper to format milliseconds into d/h/m/s
-function formatMs(ms: number): string {
-  const seconds = Math.floor(ms / 1000);
-  const days = Math.floor(seconds / 86400);
-  const hours = Math.floor((seconds % 86400) / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  const secs = seconds % 60;
-  const parts: string[] = [];
-  if (days > 0) parts.push(`${days}d`);
-  if (hours > 0) parts.push(`${hours}h`);
-  if (minutes > 0) parts.push(`${minutes}m`);
-  // Only show seconds if no larger units or if seconds > 0
-  if (secs > 0 || parts.length === 0) parts.push(`${secs}s`);
-  return parts.join(' ');
-}
+import { formatDurationMs } from '@/lib/formatDuration';
+import { shouldIgnoreKeyboardShortcuts } from '@/lib/keyboard-shortcuts';
 
 // Import shadcn/ui components
 import { PanelWidthContext } from '../../../../components/SplitLayout';
@@ -147,7 +130,7 @@ function RenameDAGButton({
     <I18nProps>
       <Button
         type="button"
-        variant="secondary"
+        variant="ghost"
         size="icon-sm"
         aria-label={`Rename workflow ${dag.dag.name}`}
         title="Rename workflow"
@@ -170,9 +153,9 @@ function DeleteDAGButton({
     <I18nProps>
       <Button
         type="button"
-        variant="secondary"
+        variant="ghost"
         size="icon-sm"
-        className="text-muted-foreground hover:border-destructive/40 hover:bg-destructive/10 hover:text-destructive focus-visible:text-destructive"
+        className="hover:bg-destructive/10 hover:text-destructive focus-visible:text-destructive"
         aria-label={`Delete workflow ${dag.dag.name}`}
         title="Delete workflow"
         onClick={() => onDelete(dag)}
@@ -274,7 +257,7 @@ function DAGCard({
           <Badge
             key={getScheduleKey(schedule, idx)}
             variant="outline"
-            className={`text-xs font-normal px-1 py-0 h-3 normal-case tracking-normal ${schedule.kind === 'at' ? 'border-0' : ''}`}
+            className={`h-[18px] rounded px-1.5 py-0 font-mono text-[11px] font-normal normal-case tracking-normal ${schedule.kind === 'at' ? 'border-0' : ''}`}
           >
             {getScheduleLabel(schedule)}
           </Badge>
@@ -306,7 +289,7 @@ function DAGCard({
                 }
                 return (
                   <span>
-                    <I18nText text={'Run in'} /> {formatMs(ms)}
+                    <I18nText text={'Run in'} /> {formatDurationMs(ms)}
                   </span>
                 );
               }}
@@ -328,13 +311,12 @@ function DAGCard({
               <Badge
                 key={label}
                 variant="outline"
-                className="text-xs px-1 py-0 h-3 rounded-sm border-primary/30 bg-primary/10 text-primary"
+                className="h-[18px] rounded border-transparent bg-muted px-1.5 py-0 text-[11px] font-normal text-muted-foreground"
                 onClick={(e) => {
                   e.stopPropagation();
                   onLabelClick(label);
                 }}
               >
-                <div className="h-1 w-1 rounded-full bg-primary/70 mr-0.5"></div>
                 {label}
               </Badge>
             ))}
@@ -344,10 +326,10 @@ function DAGCard({
       {/* Actions row: LiveSwitch + DAGActions */}
       <div className="flex flex-wrap items-center justify-between gap-1 pt-1.5 border-t border-border/50 min-w-0">
         <div
-          className={`flex items-center gap-1 flex-shrink-0 min-w-0 ${!hasSchedule ? 'opacity-40 pointer-events-none' : ''}`}
+          className="flex items-center gap-1 flex-shrink-0 min-w-0"
           onClick={(e) => e.stopPropagation()}
         >
-          <LiveSwitch dag={dag} refresh={refreshFn} />
+          {hasSchedule && <LiveSwitch dag={dag} refresh={refreshFn} />}
           <span className="text-xs text-muted-foreground truncate">
             {dag.suspended ? (
               <I18nText text={'Suspended'} />
@@ -399,7 +381,7 @@ function countLeadingPinnedRows(rows: Row<Data>[]): number {
 
 function PinnedSectionLabel() {
   return (
-    <span className="inline-flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+    <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
       <Pin className="h-3 w-3" aria-hidden="true" />
       <I18nText text={'Pinned'} />
     </span>
@@ -667,14 +649,9 @@ const defaultColumns = [
   columnHelper.accessor('name', {
     id: 'Name',
     header: () => (
-      <div className="flex flex-col py-1">
-        <span className="text-xs">
-          <I18nText text={'Name'} />
-        </span>
-        <span className="text-xs font-normal text-muted-foreground">
-          <I18nText text={'Description'} />
-        </span>
-      </div>
+      <span className="text-xs">
+        <I18nText text={'Name'} />
+      </span>
     ),
     cell: ({ row, getValue, table }) => {
       const data = row.original!;
@@ -705,7 +682,7 @@ const defaultColumns = [
           >
             <Link
               to={`/dags/${data.dag.fileName}`}
-              className="block font-medium text-foreground tracking-tight text-xs truncate hover:underline"
+              className="block truncate text-sm font-medium text-foreground hover:underline"
               onClick={(event) => event.stopPropagation()}
             >
               {getValue()}
@@ -729,7 +706,7 @@ const defaultColumns = [
                       <Badge
                         key={label}
                         variant="outline"
-                        className="text-xs px-1 py-0 h-3.5 rounded-sm border-primary/30 bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary transition-colors duration-200 cursor-pointer font-normal whitespace-normal break-words focus-visible:outline-none"
+                        className="h-[18px] gap-0.5 rounded border-transparent bg-muted px-1.5 py-0 text-[11px] font-normal text-muted-foreground transition-colors duration-150 cursor-pointer whitespace-normal break-words hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                         role="button"
                         tabIndex={0}
                         onKeyDown={(e) => {
@@ -749,10 +726,11 @@ const defaultColumns = [
                           if (handleLabelClick) handleLabelClick(label);
                         }}
                       >
-                        <div className="h-1 w-1 rounded-full bg-primary/70 mr-0.5"></div>
                         {value !== null ? (
                           <>
-                            <span className="font-medium">{key}</span>
+                            <span className="font-medium text-foreground/80">
+                              {key}
+                            </span>
                             <span className="opacity-60">=</span>
                             <span>{value}</span>
                           </>
@@ -822,14 +800,9 @@ const defaultColumns = [
     size: 80,
     minSize: 80,
     header: () => (
-      <div className="flex flex-col py-1">
-        <span className="text-xs">
-          <I18nText text={'Status'} />
-        </span>
-        <span className="text-xs font-normal text-muted-foreground">
-          <I18nText text={'Latest status'} />
-        </span>
-      </div>
+      <span className="text-xs">
+        <I18nText text={'Status'} />
+      </span>
     ),
     cell: ({ row }) => {
       // Use row
@@ -851,14 +824,9 @@ const defaultColumns = [
     size: 110,
     minSize: 90,
     header: () => (
-      <div className="flex flex-col py-1">
-        <span className="text-xs">
-          <I18nText text={'Last Run'} />
-        </span>
-        <span className="text-xs font-normal text-muted-foreground">
-          {getConfig().tz || <I18nText text={'Local Timezone'} />}
-        </span>
-      </div>
+      <span className="text-xs">
+        <I18nText text={'Last Run'} />
+      </span>
     ),
     cell: ({ row }) => {
       const data = row.original!;
@@ -885,7 +853,7 @@ const defaultColumns = [
           if (durationMs > 0) {
             durationContent = (
               <div className="text-xs text-muted-foreground">
-                {formatMs(durationMs)}
+                {formatDurationMs(durationMs)}
               </div>
             );
           }
@@ -913,14 +881,9 @@ const defaultColumns = [
     size: 140,
     minSize: 120,
     header: () => (
-      <div className="flex flex-col py-1">
-        <span className="text-xs">
-          <I18nText text={'Live / Schedule'} />
-        </span>
-        <span className="text-xs font-normal text-muted-foreground">
-          <I18nText text={'Toggle & next run'} />
-        </span>
-      </div>
+      <span className="text-xs">
+        <I18nText text={'Schedule'} />
+      </span>
     ),
     cell: ({ row, table }) => {
       const data = row.original!;
@@ -929,32 +892,22 @@ const defaultColumns = [
       }
 
       const schedules = data.dag.dag.schedule || [];
-      const hasSchedule = schedules.length > 0;
+      if (schedules.length === 0) {
+        return (
+          <span className="text-xs text-muted-foreground">
+            <I18nText text={'No schedule'} />
+          </span>
+        );
+      }
 
-      // LiveSwitch component
       const liveSwitch = (
         <div
           onClick={(e) => e.stopPropagation()}
-          className={`flex-shrink-0 p-0.5 ${!hasSchedule ? 'opacity-40 pointer-events-none' : ''}`}
+          className="flex-shrink-0 p-0.5"
         >
-          <LiveSwitch
-            dag={data.dag}
-            refresh={table.options.meta?.refreshFn}
-            aria-label={`Toggle ${data.name}`}
-          />
+          <LiveSwitch dag={data.dag} refresh={table.options.meta?.refreshFn} />
         </div>
       );
-
-      if (!hasSchedule) {
-        return (
-          <div className="flex items-center gap-2">
-            {liveSwitch}
-            <span className="text-xs text-muted-foreground">
-              <I18nText text={'No schedule'} />
-            </span>
-          </div>
-        );
-      }
 
       // Display schedule expressions
       const scheduleContent = (
@@ -963,7 +916,7 @@ const defaultColumns = [
             <Badge
               key={getScheduleKey(schedule, index)}
               variant="outline"
-              className="text-xs font-normal px-1 py-0 h-3.5 normal-case tracking-normal"
+              className="h-[18px] rounded px-1.5 py-0 font-mono text-[11px] font-normal normal-case tracking-normal"
             >
               {getScheduleLabel(schedule)}
             </Badge>
@@ -990,7 +943,7 @@ const defaultColumns = [
                   }
                   return (
                     <span>
-                      <I18nText text={'Run in'} /> {formatMs(ms)}
+                      <I18nText text={'Run in'} /> {formatDurationMs(ms)}
                     </span>
                   );
                 }}
@@ -1029,14 +982,9 @@ const defaultColumns = [
     minSize: 160,
     maxSize: 160,
     header: () => (
-      <div className="flex flex-col items-center py-1">
-        <span className="text-xs">
-          <I18nText text={'Actions'} />
-        </span>
-        <span className="text-xs font-normal text-muted-foreground">
-          <I18nText text={'Operations'} />
-        </span>
-      </div>
+      <span className="sr-only">
+        <I18nText text={'Actions'} />
+      </span>
     ),
     cell: ({ row, table }) => {
       // Use row and table
@@ -1048,7 +996,7 @@ const defaultColumns = [
       return (
         // Wrap DAGActions in a div and stop propagation on its click
         <div
-          className="flex items-center justify-center gap-1 scale-90" // Scale down for density
+          className="flex items-center justify-center gap-0.5 opacity-0 transition-opacity group-hover/row:opacity-100 group-focus-within/row:opacity-100 pointer-coarse:opacity-100"
           onClick={(e) => e.stopPropagation()}
         >
           <DAGActions
@@ -1107,21 +1055,25 @@ function WorkflowsEmptyState({
   icon,
   heading,
   description,
+  descriptionValues,
   showAllButton,
   onShowAllWorkflows,
 }: {
   icon: string;
   heading: string;
   description: string;
+  descriptionValues?: Record<string, string>;
   showAllButton: boolean;
   onShowAllWorkflows?: () => void;
 }) {
   return (
     <>
       <div className="text-6xl mb-4">{icon}</div>
-      <h3 className="text-lg font-medium text-foreground mb-2">{heading}</h3>
+      <h3 className="text-lg font-medium text-foreground mb-2">
+        <I18nText text={heading} />
+      </h3>
       <p className="text-sm text-muted-foreground text-center max-w-md mb-4 whitespace-normal break-words">
-        {description}
+        <I18nText text={description} values={descriptionValues} />
       </p>
       <div className="flex flex-wrap items-center justify-center gap-2">
         {showAllButton && (
@@ -1129,7 +1081,7 @@ function WorkflowsEmptyState({
             <I18nText text={'Show all workflows'} />
           </Button>
         )}
-        <CreateDAGModal />
+        <CreateDAGButton />
       </div>
     </>
   );
@@ -1673,6 +1625,10 @@ function DAGTable({
     if (!selectedDAG || !tableInstanceRef.current || !onSelectDAG) return;
 
     const handleKeyDown = (event: KeyboardEvent) => {
+      if (shouldIgnoreKeyboardShortcuts(event)) {
+        return;
+      }
+
       // Get all DAG rows from the sorted table rows (not groups)
       const sortedRows = tableInstanceRef.current?.getRowModel().rows || [];
       const dagRows = sortedRows
@@ -1782,7 +1738,9 @@ function DAGTable({
     ? {
         icon: '🔍',
         heading: 'No workflows found',
-        description: `No workflows match the “${activeWorkflowViewName}” view. Try adjusting its filters or show all workflows.`,
+        description:
+          'No workflows match the “{view}” view. Try adjusting its filters or show all workflows.',
+        descriptionValues: { view: activeWorkflowViewName },
       }
     : isPristineAllView
       ? {
@@ -1802,7 +1760,7 @@ function DAGTable({
       {/* Search, Filter and Pagination Controls */}
       <div
         data-testid="workflow-controls"
-        className={`mb-3 space-y-3 rounded-lg border border-border bg-card/50 p-3 ${
+        className={`mb-4 space-y-2 ${
           isLoading ? 'opacity-70 pointer-events-none' : ''
         }`}
       >
@@ -2165,7 +2123,7 @@ function DAGTable({
                           <ChevronDown className="h-4 w-4 text-muted-foreground" />
                         )}
                       </div>
-                      <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wide truncate">
+                      <span className="text-xs font-semibold text-muted-foreground truncate">
                         {groupRow.name}
                       </span>
                     </div>

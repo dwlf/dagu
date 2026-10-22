@@ -28,6 +28,7 @@ Flags:
 - `--default-working-dir` — Default working directory for DAGs without explicit workingDir
 - `--no-reuse` — Recompute reusable build steps while preserving staged, atomic publication
 - `--worker-id` — Worker ID executing this DAG run; auto-set in distributed mode and defaults to `local`
+- `--worker-label` — Worker label (`key=value`) this run requires, replacing the DAG's `worker_selector` for this run and kept with the run for retries; repeatable. Not with `--worker-id`
 - `--trigger-type` — Trigger source (`scheduler`, `manual`, `webhook`, `subdag`, `retry`, `catchup`); defaults to `manual`
 
 ### dagu enqueue
@@ -44,6 +45,7 @@ Flags:
 - `--name/-N` — Override DAG name
 - `--run-id/-r` — Custom run ID
 - `--queue/-u` — Override the DAG-level queue definition
+- `--worker-label` — Worker label (`key=value`) this run requires, replacing the DAG's `worker_selector` for this run and kept with the run so queued dispatch and retries route the same way; repeatable
 - `--labels` — Additional labels (comma-separated key=value or key-only)
 - `--tags` — Deprecated alias for `--labels`
 - `--default-working-dir` — Default working directory for DAGs without explicit workingDir
@@ -137,7 +139,9 @@ dagu human-task push-back --run-id=run-1 --step=review --input feedback="Add tes
 
 ### dagu dry
 
-Dry-run a DAG without executing commands: `dagu dry [--params/-p] [--name/-N] [--no-reuse] <dag> [-- params...]`
+Dry-run a DAG without executing commands: `dagu dry [--params/-p] [--name/-N] [--no-reuse] [--format/-f text|json] <dag> [-- params...]`
+
+`--format json` prints one JSON object on stdout, `{"checks":[...]}`, and omits the run summary. `text` is the default. A check does not change the exit status.
 
 For a build DAG, `--no-reuse` previews the decisions with manifest reuse disabled. Dry-run still creates no locks, staging files, manifests, or run history.
 
@@ -215,12 +219,13 @@ dagu browser cache clear <dag> [--step <id>]
 
 ### dagu browser session
 
-Work a site in a browser kept open between commands, then turn what worked into a `browser.run` step. Each `do` runs one operation, read from stdin in the form of a `with.do` item, exactly as a step would, and reports what it did, the actions an act performed, what an extract read, and the page next with its outline. `describe` outlines the page without a model: fields with their labels, selects with their options, buttons, links with their addresses, tables and lists, each element with an ID that `do` can act on without a model: `{"click": ID}`, `{"type": {"into": ID, "text": TEXT}}`, `{"select": {"in": ID, "option": OPTION}}`, kept as the act a step writes, with its recording. `export` builds the step from the operations that succeeded and writes their act recordings to the step's replay cache, so its first run on this host replays them without a model request. Variable values go on stdin under `variables`; `{"env": NAME}` is read from the environment on every command and masked, a plain string serves one command. Every command prints one JSON object; a failure prints `{"error": {"code", "message"}}` and exits 1. A session closes its browser when idle past `--idle-timeout` (default `30m`); its history can be exported for a day after. `close --keep` ends it the same way at once, freeing its profile for a step.
+Work a site in a browser kept open between commands, then turn what worked into a `browser.run` step. Each `do` runs one operation, read from stdin in the form of a `with.do` item, exactly as a step would, and reports what it did, the actions an act performed, what an extract read, and the page next with its outline. `describe` outlines the page without a model: fields with their labels, selects with their options, file inputs, buttons, links with their addresses, tables and lists, each element with an ID that `do` can act on without a model: `{"click": ID}`, `{"type": {"into": ID, "text": TEXT}}`, `{"select": {"in": ID, "option": OPTION}}`, kept as the act a step writes, and `{"upload": {"into": ID, "files": PATHS}}`, kept as the upload into that element in words, each with its recording. An upload's relative paths are under the current directory, and the exported step uploads the same files until you point `files` at what each run uploads. `export` builds the step from the operations that succeeded and writes their act and upload recordings to the step's replay cache, so its first run on this host replays them without a model request. Variable values go on stdin under `variables`; `{"env": NAME}` is read from the environment on every command and masked, a plain string serves one command. Every command prints one JSON object; a failure prints `{"error": {"code", "message"}}` and exits 1. When the site refused the page, with a bot check or a 403 or 429, `open`, `do`, and `describe` report `refused: {host, status, bot_check, message}`, and the error of an operation that failed on it ends with the message. A session closes its browser when idle past `--idle-timeout` (default `30m`); its history can be exported for a day after. `close --keep` ends it the same way at once, freeing its profile for a step.
 
 ```sh
 dagu browser session open [URL] [--provider P --model M | --llm '<llm block>'] [--profile N] [--headed] [--viewport WxH] [--allowed-domain D]... [--idle-timeout 30m]
 echo '{"act": "Click Sign in"}' | dagu browser session do <id>
 echo '{"click": "0-131"}' | dagu browser session do <id>
+echo '{"upload": {"into": "0-57", "files": "/path/to/invoice.pdf"}}' | dagu browser session do <id>
 dagu browser session describe <id> [--find TEXT] [--format text] [--screenshot NAME]
 dagu browser session export <id> --dag <name|file> --step <id> [--skip N]... [--dry-run] [--close] [--format yaml]
 dagu browser session close <id> [--force] [--keep]
@@ -229,7 +234,7 @@ dagu browser session list
 
 ### dagu computer check
 
-Check that computer steps can capture the screen and send input in the current session. Run it as the user and in the session of the worker that runs computer steps. On macOS it also asks macOS to show the Screen Recording and Accessibility prompts for missing permissions. Exits nonzero and lists the problems when the desktop cannot be automated. `--format json` prints `{os, width, height, ready, problems}`, each problem with a `code` (such as `screen_recording`, `accessibility`, or `screen_locked`) and a `message`.
+Check that computer steps can capture the screen and send input in the current session. Run it as the user and in the session of the worker that runs computer steps. On macOS it also asks macOS to show the Screen Recording and Accessibility prompts for missing permissions. Exits nonzero and lists the problems when the desktop cannot be automated. `--format json` prints `{os, width, height, ready, problems}`, each problem with a `code` (such as `screen_recording`, `accessibility`, `screen_locked`, or `session_disconnected` for a Remote Desktop or child session whose client has gone) and a `message`.
 
 ```sh
 dagu computer check [--format json]
@@ -248,7 +253,15 @@ dagu computer elements [--format json] [--limit N] [--at-pointer [--after 3s] | 
 Clear the recorded `act` operations that computer steps replay, so the next run asks the model again. Without `--step`, every step of the DAG is cleared. The cache lives on the host that ran the step; in distributed mode, run it on the worker.
 
 ```sh
-dagu computer cache clear <dag> [--step <id>]
+dagu computer cache clear <dag> [--step <id> [--op <position>]]
+```
+
+### dagu computer cache show
+
+Show what a DAG's computer steps recorded on this host in the form a step pins it, to review and write into the step's `recorded` or `fields` so every device of that system runs it with no model. Without `--step`, every step is shown; `--op` keeps one task, counted from 1. A task recorded under several instructions or parameters shows each, newest first. An act with an action that has no pinned form, such as a drag, a click where no element could be read, or one near an element's edge, lists each such action and why instead of steps. `--format json` prints `{operations}`, each with `step`, `op`, `kind`, `system`, `saved_at`, and `recorded`, `fields`, or `unpinnable` (`turn`, `action`, `code`, `reason`).
+
+```sh
+dagu computer cache show <dag> [--step <id> [--op <position>]] [--format json]
 ```
 
 ### dagu xlsx inspect

@@ -27,7 +27,7 @@ import { SchemaProvider } from './contexts/SchemaContext';
 import { SearchStateProvider } from './contexts/SearchStateContext';
 import {
   UserPreferencesProvider,
-  useUserPreferences,
+  useResolvedTheme,
 } from './contexts/UserPreference';
 import Layout from './layouts/Layout';
 import fetchJson from './lib/fetchJson';
@@ -75,6 +75,7 @@ const IncidentProvidersPage = React.lazy(
 const IncidentsPage = React.lazy(() => import('./pages/incidents'));
 const IntegrationsPage = React.lazy(() => import('./pages/integrations'));
 const LicensePage = React.lazy(() => import('./pages/license'));
+const NotFoundPage = React.lazy(() => import('./pages/not-found'));
 const NotificationChannelsPage = React.lazy(
   () => import('./pages/notification-channels')
 );
@@ -118,7 +119,7 @@ const STATIC_PAGE_TITLES = new Set([
   'Notifications',
   'Profiles & Secrets',
   'Queue',
-  'Queue Dashboard',
+  'Queues',
   'Remote Nodes',
   'Search',
   'System Status',
@@ -242,7 +243,7 @@ function LicensedRoute({
 }): React.ReactElement {
   const hasFeature = useHasFeature(feature);
   if (hasFeature) return children;
-  return <LicenseFeaturePrompt feature={feature} />;
+  return <LicenseFeaturePrompt feature={feature} headingLevel={1} />;
 }
 
 function ActiveLicenseDeveloperElement({
@@ -254,7 +255,11 @@ function ActiveLicenseDeveloperElement({
   const licensed = hasActiveLicense(license);
   return (
     <DeveloperElement>
-      {licensed ? children : <LicenseFeaturePrompt feature="incidents" />}
+      {licensed ? (
+        children
+      ) : (
+        <LicenseFeaturePrompt feature="incidents" headingLevel={1} />
+      )}
     </DeveloperElement>
   );
 }
@@ -296,7 +301,7 @@ class LazyRouteErrorBoundary extends React.Component<
           </p>
           <button
             type="button"
-            className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground"
+            className="rounded-md bg-primary-fill px-4 py-2 text-sm font-medium text-primary-foreground"
             onClick={() => window.location.reload()}
           >
             <I18nText text={'Reload'} />
@@ -333,8 +338,7 @@ function AppInner({ config: initialConfig }: Props): React.ReactElement {
   }, []);
 
   const [title, setTitle] = React.useState<string>('');
-  const { preferences } = useUserPreferences();
-  const theme = preferences.theme || 'dark';
+  const theme = useResolvedTheme();
 
   const [remoteNodes, setRemoteNodes] = React.useState<string[]>(() =>
     parseRemoteNodes(config.remoteNodes)
@@ -580,6 +584,7 @@ function AppInner({ config: initialConfig }: Props): React.ReactElement {
 
   React.useEffect(() => {
     document.documentElement.classList.toggle('dark', theme === 'dark');
+    document.documentElement.style.colorScheme = theme;
     document.documentElement.style.backgroundColor = 'var(--background)';
   }, [theme]);
 
@@ -876,6 +881,10 @@ function AppInner({ config: initialConfig }: Props): React.ReactElement {
                                             <GitSyncPage />
                                           </GitSyncElement>
                                         }
+                                      />
+                                      <Route
+                                        path="*"
+                                        element={<NotFoundPage />}
                                       />
                                     </LazyRoutes>
                                   </Layout>

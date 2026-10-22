@@ -105,7 +105,7 @@ describe('StartDAGModal', () => {
     ).toBeInTheDocument();
     expect(
       within(runSettings).getByRole('textbox', {
-        name: 'DAG-Run ID (optional)',
+        name: 'Run ID (optional)',
       })
     ).toBeInTheDocument();
     expect(
@@ -114,6 +114,29 @@ describe('StartDAGModal', () => {
 
     const parameters = screen.getByRole('region', { name: 'Parameters' });
     expect(within(parameters).getByLabelText(/region/i)).toBeInTheDocument();
+  });
+
+  it('leaves out parameters for a workflow without any', () => {
+    render(
+      <StartDAGModal
+        visible={true}
+        dismissModal={vi.fn()}
+        onSubmit={vi.fn()}
+        dag={
+          {
+            name: 'example-dag',
+            runConfig: { disableParamEdit: true },
+          } as never
+        }
+      />
+    );
+
+    expect(
+      screen.queryByRole('region', { name: 'Parameters' })
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText('Parameter editing is disabled.')
+    ).not.toBeInTheDocument();
   });
 
   it('toggles between compact and fullscreen layouts', async () => {

@@ -7,6 +7,7 @@
  * @module features/dags/components/dag-details
  */
 import dayjs from '@/lib/dayjs';
+import RelativeTime from '@/components/ui/relative-time';
 import {
   humanizeIdentifier,
   runtimeConditionLabel,
@@ -28,35 +29,45 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   components,
   DAGRunConditionStatus,
+  NodeStatusLabel,
   Status,
 } from '../../../../api/v1/schema';
 import { triggerTypeLabels } from '../common/TriggerTypeIndicator';
 import { I18nText } from '@/i18n/I18nText';
+import { useI18n } from '@/i18n/I18nProvider';
+import { statusLabelText } from '@/lib/status-utils';
 import { I18nProps } from '@/i18n/I18nProps';
 
 type Props = {
   status?: components['schemas']['DAGRunDetails'];
   onViewLog?: (dagRunId: string) => void;
+  /**
+   * Shows parameters, timing, trigger, worker, and run ID. Leave it off
+   * where a header already shows them.
+   */
+  showRunMeta?: boolean;
 };
 
 type NodeStatusConfig = {
-  key: string;
-  label: string;
+  key: NodeStatusLabel;
   colorClass: string;
 };
 
 // Unified status colors matching the execution graph
 const NODE_STATUS_CONFIG: NodeStatusConfig[] = [
-  { key: 'succeeded', label: 'success', colorClass: 'bg-[var(--status-success)]' },
-  { key: 'running', label: 'running', colorClass: 'bg-[var(--status-running)]' },
-  { key: 'retrying', label: 'retrying', colorClass: 'bg-[var(--status-warning)]' },
-  { key: 'failed', label: 'failed', colorClass: 'bg-[var(--status-error)]' },
-  { key: 'queued', label: 'queued', colorClass: 'bg-[var(--status-neutral)]' },
-  { key: 'not_started', label: 'not started', colorClass: 'bg-[var(--status-neutral)]' },
-  { key: 'skipped', label: 'skipped', colorClass: 'bg-[var(--status-neutral)]' },
-  { key: 'aborted', label: 'aborted', colorClass: 'bg-[var(--status-aborted)]' },
-  { key: 'waiting', label: 'waiting', colorClass: 'bg-[var(--status-warning)]' },
-  { key: 'rejected', label: 'rejected', colorClass: 'bg-[var(--status-error)]' },
+  { key: NodeStatusLabel.succeeded, colorClass: 'bg-[var(--status-success)]' },
+  { key: NodeStatusLabel.running, colorClass: 'bg-[var(--status-running)]' },
+  { key: NodeStatusLabel.retrying, colorClass: 'bg-[var(--status-warning)]' },
+  {
+    key: NodeStatusLabel.partially_succeeded,
+    colorClass: 'bg-[var(--status-warning)]',
+  },
+  { key: NodeStatusLabel.failed, colorClass: 'bg-[var(--status-error)]' },
+  { key: NodeStatusLabel.not_started, colorClass: 'bg-[var(--status-neutral)]' },
+  { key: NodeStatusLabel.skipped, colorClass: 'bg-[var(--status-neutral)]' },
+  { key: NodeStatusLabel.aborted, colorClass: 'bg-[var(--status-aborted)]' },
+  { key: NodeStatusLabel.waiting, colorClass: 'bg-[var(--status-warning)]' },
+  { key: NodeStatusLabel.rejected, colorClass: 'bg-[var(--status-error)]' },
 ];
 
 type ExecutionStatusConfig = {
@@ -99,17 +110,6 @@ const EXECUTION_STATUS_CONFIG: ExecutionStatusConfig[] = [
   },
 ];
 
-function formatTimestamp(timestamp: string | undefined): string {
-  if (!timestamp || timestamp === '-') {
-    return '-';
-  }
-  const parsed = dayjs(timestamp);
-  if (!parsed.isValid()) {
-    return timestamp;
-  }
-  return parsed.format('YYYY-MM-DD HH:mm:ss');
-}
-
 function truncateId(id: string): string {
   if (id.length <= 16) return id;
   return `${id.slice(0, 8)}...${id.slice(-4)}`;
@@ -151,15 +151,16 @@ function RuntimeConditionCard({
         <span className="font-semibold text-foreground">
           {runtimeConditionLabel(condition)}
         </span>
-        <span className="font-mono text-muted-foreground">
-          {formatTimestamp(condition.checkedAt)}
-        </span>
+        <RelativeTime
+          className="font-mono text-muted-foreground"
+          timestamp={condition.checkedAt}
+        />
       </div>
       <div className="text-muted-foreground break-words">
         {condition.message}
       </div>
       {condition.reason && (
-        <div className="mt-0.5 text-muted-foreground/80 break-words">
+        <div className="mt-0.5 text-muted-foreground break-words">
           <I18nText text={"Reason:"} /> {humanizeIdentifier(condition.reason)}
         </div>
       )}
@@ -210,7 +211,7 @@ function RunError({ error }: { error?: string }): React.JSX.Element | null {
       <div className="flex items-center mb-1">
         <AlertCircle className="h-3.5 w-3.5 mr-1 text-error" />
         <span className="text-xs font-semibold text-error">
-          <I18nText text={"DAGRun Error"} />
+          <I18nText text={"Run error"} />
         </span>
       </div>
       <div className="p-1.5 bg-error-muted border border-error/20 rounded-md text-xs text-error font-medium whitespace-pre-wrap break-words">
@@ -234,7 +235,7 @@ function PreconditionErrors({
       <div className="flex items-center mb-1">
         <Info className="h-3.5 w-3.5 mr-1 text-warning" />
         <span className="text-xs font-semibold text-warning">
-          <I18nText text={"DAGRun Precondition Unmet"} />
+          <I18nText text={"Run precondition not met"} />
         </span>
       </div>
       <div className="space-y-2">
@@ -294,7 +295,9 @@ function formatDuration(
 function DAGStatusOverview({
   status,
   onViewLog,
+  showRunMeta = true,
 }: Props): React.JSX.Element | null {
+  const { ts } = useI18n();
   const [currentDuration, setCurrentDuration] = useState<string>('-');
   const [copied, setCopied] = useState(false);
 
@@ -352,119 +355,117 @@ function DAGStatusOverview({
 
   return (
     <div className="min-w-0 space-y-2">
-      {/* Parameters - Only show when present */}
-      {status.params && (
-        <div className="flex min-w-0 items-center gap-1.5 text-xs font-mono">
-          <Terminal className="h-3 w-3 text-muted-foreground flex-shrink-0" />
-          <span
-            className="min-w-0 truncate text-foreground"
-            title={status.params}
-          >
-            {status.params}
-          </span>
-        </div>
-      )}
-
-      {/* Timing & Metadata - Compact grid */}
-      <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1 text-xs">
-        {status.scheduleTime && (
-          <span>
-            <span className="text-muted-foreground"><I18nText text={"Scheduled"} /> </span>
-            <span className="font-mono text-foreground">
-              {formatTimestamp(status.scheduleTime)}
-            </span>
-          </span>
-        )}
-        {status.queuedAt && (
-          <span>
-            <span className="text-muted-foreground"><I18nText text={"Queued"} /> </span>
-            <span className="font-mono text-foreground">
-              {formatTimestamp(status.queuedAt)}
-            </span>
-          </span>
-        )}
-        <span>
-          <span className="text-muted-foreground"><I18nText text={"Started"} /> </span>
-          <span className="font-mono text-foreground">
-            {formatTimestamp(status.startedAt)}
-          </span>
-        </span>
-        <span>
-          <span className="text-muted-foreground"><I18nText text={"Finished"} /> </span>
-          <span className="font-mono text-foreground">
-            {formatTimestamp(status.finishedAt)}
-          </span>
-        </span>
-        <span className="flex items-center gap-1">
-          <span className="text-muted-foreground"><I18nText text={"Duration"} /> </span>
-          <span className="font-mono font-medium text-foreground">
-            {currentDuration}
-          </span>
-          {isRunning && (
-            <span className="inline-block w-1.5 h-1.5 rounded-full bg-success animate-pulse" />
+      {showRunMeta && (
+        <>
+          {/* Parameters - Only show when present */}
+          {status.params && (
+            <div className="flex min-w-0 items-center gap-1.5 text-xs font-mono">
+              <Terminal className="h-3 w-3 text-muted-foreground flex-shrink-0" />
+              <span
+                className="min-w-0 truncate text-foreground"
+                title={status.params}
+              >
+                {status.params}
+              </span>
+            </div>
           )}
-        </span>
-      </div>
 
-      {/* Metadata row */}
-      <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-xs">
-        {status.triggerType && (
-          <span>
-            <span className="text-muted-foreground"><I18nText text={"Trigger"} /> </span>
-            <span className="font-medium text-foreground">
-              {triggerTypeLabels[status.triggerType] ?? status.triggerType}
-            </span>
-          </span>
-        )}
-        {status.triggerActor && (
-          <span>
-            <span className="text-muted-foreground"><I18nText text={"Actor"} /> </span>
-            <span className="font-medium text-foreground">
-              {status.triggerActor}
-            </span>
-          </span>
-        )}
-        {status.profileName && (
-          <span className="inline-flex max-w-[180px] items-center gap-1 truncate">
-            <SlidersHorizontal className="h-3 w-3 text-muted-foreground" />
-            <span className="font-medium text-foreground">
-              {status.profileName}
-            </span>
-          </span>
-        )}
-        {status.workerId && (
-          <span className="truncate max-w-[180px]" title={status.workerId}>
-            <span className="text-muted-foreground"><I18nText text={"Worker"} /> </span>
-            <span className="font-medium text-foreground">
-              {status.workerId}
-            </span>
-          </span>
-        )}
-        {status.dagRunId && (
-          <button
-            onClick={copyRunId}
-            className="inline-flex min-w-0 max-w-full cursor-pointer items-center gap-1 font-mono text-muted-foreground transition-colors hover:text-foreground"
-            title={`Click to copy: ${status.dagRunId}`}
-          >
-            <span className="truncate">{truncateId(status.dagRunId)}</span>
-            {copied ? (
-              <Check className="h-3 w-3 text-success" />
-            ) : (
-              <Copy className="h-3 w-3 opacity-50" />
+          {/* Timing & Metadata - Compact grid */}
+          <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1 text-xs">
+            {status.scheduleTime && (
+              <span>
+                <span className="text-muted-foreground"><I18nText text={"Scheduled"} /> </span>
+                <RelativeTime
+                  className="font-mono text-foreground"
+                  timestamp={status.scheduleTime}
+                />
+              </span>
             )}
-          </button>
-        )}
-        {status.dagRunId && onViewLog && (
-          <I18nProps><button
-            onClick={() => onViewLog(status.dagRunId)}
-            className="ml-auto inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded border border-border bg-card hover:bg-muted transition-colors cursor-pointer"
-            title="View Scheduler Log"
-          >
-            <Terminal className="h-3 w-3" />
-            <span><I18nText text={"Log"} /></span>
-          </button></I18nProps>
-        )}
-      </div>
+            {status.queuedAt && (
+              <span>
+                <span className="text-muted-foreground"><I18nText text={"Queued"} /> </span>
+                <RelativeTime
+                  className="font-mono text-foreground"
+                  timestamp={status.queuedAt}
+                />
+              </span>
+            )}
+            <span>
+              <span className="text-muted-foreground"><I18nText text={"Started"} /> </span>
+              <RelativeTime
+                className="font-mono text-foreground"
+                timestamp={status.startedAt}
+              />
+            </span>
+            <span>
+              <span className="text-muted-foreground"><I18nText text={"Finished"} /> </span>
+              <RelativeTime
+                className="font-mono text-foreground"
+                timestamp={status.finishedAt}
+              />
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="text-muted-foreground"><I18nText text={"Duration"} /> </span>
+              <span className="font-mono font-medium text-foreground">
+                {currentDuration}
+              </span>
+              {isRunning && (
+                <span className="inline-block w-1.5 h-1.5 rounded-full bg-success animate-pulse" />
+              )}
+            </span>
+          </div>
+
+          {/* Metadata row */}
+          <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+            {status.triggerType && (
+              <span>
+                <span className="text-muted-foreground"><I18nText text={"Trigger"} /> </span>
+                <span className="font-medium text-foreground">
+                  {triggerTypeLabels[status.triggerType] ?? status.triggerType}
+                </span>
+              </span>
+            )}
+            {status.triggerActor && (
+              <span>
+                <span className="text-muted-foreground"><I18nText text={"Actor"} /> </span>
+                <span className="font-medium text-foreground">
+                  {status.triggerActor}
+                </span>
+              </span>
+            )}
+            {status.profileName && (
+              <span className="inline-flex max-w-[180px] items-center gap-1 truncate">
+                <SlidersHorizontal className="h-3 w-3 text-muted-foreground" />
+                <span className="font-medium text-foreground">
+                  {status.profileName}
+                </span>
+              </span>
+            )}
+            {status.workerId && (
+              <span className="truncate max-w-[180px]" title={status.workerId}>
+                <span className="text-muted-foreground"><I18nText text={"Worker"} /> </span>
+                <span className="font-medium text-foreground">
+                  {status.workerId}
+                </span>
+              </span>
+            )}
+            {status.dagRunId && (
+              <button
+                onClick={copyRunId}
+                className="inline-flex min-w-0 max-w-full cursor-pointer items-center gap-1 font-mono text-muted-foreground transition-colors hover:text-foreground"
+                title={`Click to copy: ${status.dagRunId}`}
+              >
+                <span className="truncate">{truncateId(status.dagRunId)}</span>
+                {copied ? (
+                  <Check className="h-3 w-3 text-success" />
+                ) : (
+                  <Copy className="h-3 w-3 opacity-50" />
+                )}
+              </button>
+            )}
+          </div>
+        </>
+      )}
 
       {/* Node Status - Progress bar with inline counts */}
       <div className="flex items-center gap-2 text-xs">
@@ -478,6 +479,7 @@ function DAGStatusOverview({
                   key={config.key}
                   className={`h-full ${config.colorClass}`}
                   style={{ width: `${(count / totalNodes) * 100}%` }}
+                  title={`${ts(statusLabelText(config.key))}: ${count}`}
                 />
               );
             })}
@@ -486,6 +488,16 @@ function DAGStatusOverview({
         <span className="text-xs text-muted-foreground tabular-nums">
           {nodeStatus?.succeeded ?? 0}/{totalNodes}
         </span>
+        {status.dagRunId && onViewLog && (
+          <I18nProps><button
+            onClick={() => onViewLog(status.dagRunId)}
+            className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded border border-border bg-card hover:bg-muted transition-colors cursor-pointer"
+            title="View scheduler log"
+          >
+            <Terminal className="h-3 w-3" />
+            <span><I18nText text={"Log"} /></span>
+          </button></I18nProps>
+        )}
       </div>
 
       {/* Execution status message */}

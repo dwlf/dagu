@@ -726,6 +726,12 @@ func (a *Agent) Run(ctx context.Context) (runErr error) {
 		return err
 	}
 
+	payload, err := webhookPayload(a.dag.Params, a.dag.ParamsJSON)
+	if err != nil {
+		return err
+	}
+	defer payload.cleanup()
+
 	contextOpts := []runtime.ContextOption{
 		runtime.WithDAGLoader(dagLoader),
 		runtime.WithRunStateStore(a.runStateStore),
@@ -738,7 +744,7 @@ func (a *Agent) Run(ctx context.Context) (runErr error) {
 		runtime.WithTriggerType(a.triggerType),
 		runtime.WithTriggerActor(a.triggerActor),
 		runtime.WithRunStartedAt(contextTimeString(a.plan.StartAt())),
-		runtime.WithParams(a.dag.Params),
+		runtime.WithParams(payload.params),
 		runtime.WithRuntimeProfileValues(
 			profileValues.defaultEnvs,
 			profileValues.defaultSecrets,
@@ -754,6 +760,12 @@ func (a *Agent) Run(ctx context.Context) (runErr error) {
 	}
 	if len(a.extraEnvs) > 0 {
 		contextOpts = append(contextOpts, runtime.WithEnvVars(a.extraEnvs...))
+	}
+	if payload.fileEnv != "" {
+		contextOpts = append(contextOpts, runtime.WithEnvVars(payload.fileEnv))
+	}
+	if payload.paramsJSON != nil {
+		contextOpts = append(contextOpts, runtime.WithParamsJSON(*payload.paramsJSON))
 	}
 	if len(a.inheritedEnvs) > 0 {
 		contextOpts = append(contextOpts, runtime.WithInheritedEnvs(a.inheritedEnvs))
@@ -1492,6 +1504,20 @@ func (a *Agent) buildOutputs(ctx context.Context, finalStatus ir.Status) *ir.DAG
 		},
 		Outputs: outputs,
 	}
+}
+
+// DryRunChecks returns the problems a dry run recorded, in run order.
+// It is empty when the run recorded none.
+func (a *Agent) DryRunChecks() []runtime.DryRunCheck {
+	a.lock.RLock()
+	runner := a.runner
+	plan := a.plan
+	a.lock.RUnlock()
+
+	if runner == nil {
+		return nil
+	}
+	return runner.DryRunChecks(plan)
 }
 
 func (a *Agent) PrintSummary(ctx context.Context) {
@@ -2522,7 +2548,9 @@ func (a *Agent) setupStepRetryPlan(nodes []*runtime.Node) (*runtime.Plan, error)
 
 // setupDefaultRetryPlan sets up the plan for the default retry behavior (all failed/canceled nodes and downstreams).
 func (a *Agent) setupDefaultRetryPlan(ctx context.Context, nodes []*runtime.Node) (*runtime.Plan, error) {
-	plan, err := runtime.CreateRetryPlan(ctx, a.dag, nodes...)
+	plan, err := runtime.CreateRetryPlanWithOptions(ctx, a.dag, runtime.RetryPlanOptions{
+		Resume: a.retryTarget != nil && a.retryTarget.Status == ir.Queued && a.retryTarget.Resume,
+	}, nodes...)
 	if err != nil {
 		return nil, err
 	}

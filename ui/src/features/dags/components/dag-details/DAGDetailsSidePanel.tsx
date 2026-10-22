@@ -15,7 +15,6 @@ import { useQuery } from '@/hooks/api';
 import { useDAGSSE } from '@/hooks/useDAGSSE';
 import { whenEnabled } from '@/hooks/queryUtils';
 import { sseFallbackOptions, useSSECacheSync } from '@/hooks/useSSECacheSync';
-import dayjs from '@/lib/dayjs';
 import { shouldIgnoreKeyboardShortcuts } from '@/lib/keyboard-shortcuts';
 import { cn } from '@/lib/utils';
 import LoadingIndicator from '@/components/ui/loading-indicator';
@@ -56,25 +55,6 @@ type Props = {
 };
 
 const CLOSE_ANIMATION_MS = 200;
-
-function formatDuration(startDate: string, endDate: string): string {
-  if (!startDate || !endDate) {
-    return '--';
-  }
-
-  const duration = dayjs.duration(dayjs(endDate).diff(dayjs(startDate)));
-  const hours = Math.floor(duration.asHours());
-  const minutes = duration.minutes();
-  const seconds = duration.seconds();
-
-  if (hours > 0) {
-    return `${hours}h ${minutes}m ${seconds}s`;
-  }
-  if (minutes > 0) {
-    return `${minutes}m ${seconds}s`;
-  }
-  return `${seconds}s`;
-}
 
 function getLoadState(
   data: DAGDetailsResponse | undefined,
@@ -243,7 +223,7 @@ function DAGDetailsSidePanel({
     }
 
     function handleKeyDown(event: KeyboardEvent): void {
-      if (shouldIgnoreKeyboardShortcuts()) {
+      if (shouldIgnoreKeyboardShortcuts(event)) {
         return;
       }
       if (event.metaKey || event.ctrlKey) {
@@ -309,10 +289,11 @@ function DAGDetailsSidePanel({
                       size="icon"
                       onClick={handleFullscreenClick}
                       title="Open in fullscreen (F) - Cmd/Ctrl+Click to open in new tab"
+                  aria-label="Open in fullscreen"
                       className="relative group"
                     >
                       <Maximize2 className="h-4 w-4" />
-                      <span className="absolute -bottom-1 -right-1 bg-muted text-muted-foreground text-xs font-medium px-1 rounded-sm border opacity-0 group-hover:opacity-100 transition-opacity">
+                      <span aria-hidden="true" className="absolute -bottom-1 -right-1 bg-muted text-muted-foreground text-xs font-medium px-1 rounded-sm border opacity-0 group-hover:opacity-100 transition-opacity">
                         <I18nText text={"F"} />
                       </span>
                     </Button></I18nProps>
@@ -321,10 +302,11 @@ function DAGDetailsSidePanel({
                       size="icon"
                       onClick={onClose}
                       title="Close (Esc)"
+                  aria-label="Close"
                       className="relative group"
                     >
                       <X className="h-4 w-4" />
-                      <span className="absolute -bottom-1 -right-1 bg-muted text-muted-foreground text-xs font-medium px-1 rounded-sm border opacity-0 group-hover:opacity-100 transition-opacity">
+                      <span aria-hidden="true" className="absolute -bottom-1 -right-1 bg-muted text-muted-foreground text-xs font-medium px-1 rounded-sm border opacity-0 group-hover:opacity-100 transition-opacity">
                         <I18nText text={"Esc"} />
                       </span>
                     </Button></I18nProps>
@@ -335,7 +317,7 @@ function DAGDetailsSidePanel({
                   {loadState.state === 'loading' && (
                     <div className="flex h-full flex-col items-center justify-center gap-3 text-sm text-muted-foreground">
                       <LoadingIndicator />
-                      <p><I18nText text={"Loading DAG details..."} /></p>
+                      <p><I18nText text={"Loading workflow..."} /></p>
                     </div>
                   )}
 
@@ -378,7 +360,6 @@ function DAGDetailsSidePanel({
                       dagRunId="latest"
                       stepName={null}
                       refreshFn={refreshFn}
-                      formatDuration={formatDuration}
                       activeTab={activeTab}
                       onTabChange={setActiveTab}
                       isModal={true}

@@ -14,6 +14,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ConfigContext, type Config } from '@/contexts/ConfigContext';
 import { UserPreferencesProvider } from '@/contexts/UserPreference';
 import { I18nProvider } from '@/i18n/I18nProvider';
+import { dispatchHandledEscape } from '@/test/keyboard';
 import Layout from '../Layout';
 
 vi.mock('@/components/LicenseBadge', () => ({ LicenseBadge: () => null }));
@@ -87,9 +88,6 @@ describe('Layout', () => {
       within(breadcrumbs).getByRole('link', { name: 'Executions' })
     ).toHaveAttribute('href', '/dag-runs');
     expect(
-      within(breadcrumbs).getByRole('link', { name: 'DAG Runs' })
-    ).toHaveAttribute('href', '/dag-runs');
-    expect(
       within(breadcrumbs).getByRole('link', {
         name: 'briefing_gmail_fetch_test',
       })
@@ -107,7 +105,19 @@ describe('Layout', () => {
         name: '019df6cf-0127-7340-bd96-d51bc1453045',
       })
     ).toHaveAttribute('aria-current', 'page');
-    expect(within(breadcrumbs).getAllByRole('link')).toHaveLength(5);
+    expect(within(breadcrumbs).getAllByRole('link')).toHaveLength(4);
+  });
+
+  it('labels unknown routes as not found instead of echoing the URL', () => {
+    renderLayout('/this-does-not-exist');
+
+    const breadcrumbs = screen.getByRole('navigation', { name: 'breadcrumb' });
+    expect(
+      within(breadcrumbs).getByRole('link', { name: 'Page not found' })
+    ).toHaveAttribute('aria-current', 'page');
+    expect(
+      within(breadcrumbs).queryByText('This Does Not Exist')
+    ).not.toBeInTheDocument();
   });
 
   it('opens the mobile navigation as a keyboard-contained dialog', async () => {
@@ -131,6 +141,15 @@ describe('Layout', () => {
     fireEvent.keyDown(window, { key: 'Escape' });
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     await waitFor(() => expect(openButton).toHaveFocus());
+  });
+
+  it('keeps the mobile navigation open when a menu in it handles Escape', () => {
+    renderLayout('/home');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open menu' }));
+    dispatchHandledEscape();
+
+    expect(screen.getByRole('dialog', { name: 'Dagu' })).toBeInTheDocument();
   });
 
   it('localizes mobile navigation controls', () => {
@@ -163,9 +182,30 @@ describe('Layout', () => {
     expect(
       within(breadcrumbs).getByRole('link', { name: '执行记录' })
     ).toBeVisible();
-    expect(
-      within(breadcrumbs).getByRole('link', { name: 'DAG 运行' })
-    ).toBeVisible();
+  });
+
+  // Custom navbar colors drive every sidebar text token, so labels stay
+  // readable on any background brightness.
+  it('derives sidebar text colors from a custom navbar color', () => {
+    render(
+      <UserPreferencesProvider>
+        <I18nProvider>
+          <MemoryRouter initialEntries={['/dags']}>
+            <ConfigContext.Provider value={config}>
+              <Layout navbarColor="#1e3a8a">
+                <div>Page Content</div>
+              </Layout>
+            </ConfigContext.Provider>
+          </MemoryRouter>
+        </I18nProvider>
+      </UserPreferencesProvider>
+    );
+
+    const sidebar = screen.getByTestId('app-sidebar');
+    expect(sidebar.style.getPropertyValue('--sidebar-foreground')).toBe('#fff');
+    expect(sidebar.style.getPropertyValue('--sidebar-accent-foreground')).toBe(
+      '#fff'
+    );
   });
 
   it('leaves license and monitoring notices to the license page', () => {

@@ -1,30 +1,21 @@
 // Copyright (C) 2026 Yota Hamada
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-import {
-  Calendar,
-  Check,
-  FileText,
-  Link2,
-  RefreshCw,
-  Server,
-  SlidersHorizontal,
-  Terminal,
-  Timer,
-} from 'lucide-react';
+import { Check, FileText, Link2 } from 'lucide-react';
 import React, { useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { components, Status } from '../../../../api/v1/schema';
 import { useConfig } from '../../../../contexts/ConfigContext';
 import { useRemoteNode } from '../../../../contexts/RemoteNodeContext';
 import { useCopyFeedback } from '@/hooks/useCopyFeedback';
-import dayjs from '../../../../lib/dayjs';
 import StatusChip from '@/components/ui/status-chip';
 import AutoRetryBadge from '../common/AutoRetryBadge';
 import { DAGRunActions } from '../common';
+import { RunMetaLine } from '../common/RunMetaLine';
 import { buildDAGPageURL, buildDAGRunPageURL } from '../../lib/dagRunUrls';
 import { I18nText } from '@/i18n/I18nText';
 import { I18nProps } from '@/i18n/I18nProps';
+import { RefreshButton } from '@/components/ui/refresh-button';
 
 interface DAGRunHeaderProps {
   dagRun: components['schemas']['DAGRunDetails'];
@@ -40,8 +31,11 @@ const DAGRunHeader: React.FC<DAGRunHeaderProps> = ({
   const navigate = useNavigate();
   const remoteNode = useRemoteNode();
   const config = useConfig();
-  const [isRefreshing, setIsRefreshing] = React.useState(false);
   const { copied: linkCopied, copy: copyLink } = useCopyFeedback();
+  const { copied: runIdCopied, copy: copyRunId } = useCopyFeedback();
+  // Announces whichever copy happened last, even while the other's feedback
+  // is still showing.
+  const [lastCopy, setLastCopy] = React.useState<'link' | 'runId' | null>(null);
 
   const copyRunLink = () => {
     const basePrefix = config.basePath === '/' ? '' : (config.basePath ?? '');
@@ -52,31 +46,9 @@ const DAGRunHeader: React.FC<DAGRunHeaderProps> = ({
       subDAGRunId:
         dagRun.dagRunId !== dagRun.rootDAGRunId ? dagRun.dagRunId : undefined,
     });
+    setLastCopy('link');
     void copyLink(`${window.location.origin}${basePrefix}${runPath}`);
   };
-
-  function formatDuration(startDate: string, endDate: string): string {
-    if (!startDate || !endDate) return '--';
-
-    const duration = dayjs.duration(dayjs(endDate).diff(dayjs(startDate)));
-    const hours = Math.floor(duration.asHours());
-    const minutes = duration.minutes();
-    const seconds = duration.seconds();
-
-    if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
-    if (minutes > 0) return `${minutes}m ${seconds}s`;
-    return `${seconds}s`;
-  }
-
-  function getDurationDisplay(startedAt: string, finishedAt: string): string {
-    if (finishedAt) {
-      return formatDuration(startedAt, finishedAt);
-    }
-    if (startedAt) {
-      return formatDuration(startedAt, dayjs().toISOString());
-    }
-    return '--';
-  }
 
   const handleRootDAGRunClick = (e: React.MouseEvent) => {
     e.preventDefault();
@@ -103,11 +75,9 @@ const DAGRunHeader: React.FC<DAGRunHeaderProps> = ({
     }
   };
 
-  const handleRefresh = () => {
-    setIsRefreshing(true);
+  const handleRefresh = React.useCallback(() => {
     refreshFn();
-    setTimeout(() => setIsRefreshing(false), 600);
-  };
+  }, [refreshFn]);
 
   // Add keyboard shortcut for refresh
   useEffect(() => {
@@ -142,12 +112,12 @@ const DAGRunHeader: React.FC<DAGRunHeaderProps> = ({
   }, [handleRefresh]);
 
   return (
-    <div className="bg-card rounded-2xl p-6 border border-border shadow-sm">
+    <div className="space-y-4">
       {/* Header with title and actions */}
-      <div className="flex items-start justify-between gap-6 mb-4">
+      <div className="flex items-start justify-between gap-6">
         <div className="flex-1 min-w-0">
           {/* Breadcrumb navigation */}
-          <nav className="flex flex-wrap items-center gap-1.5 text-sm text-muted-foreground mb-2">
+          <nav className="flex flex-wrap items-center gap-1.5 text-sm text-muted-foreground empty:hidden [&:not(:empty)]:mb-2">
             {dagRun.rootDAGRunId !== dagRun.dagRunId && (
               <>
                 <span className="font-medium">
@@ -195,175 +165,108 @@ const DAGRunHeader: React.FC<DAGRunHeaderProps> = ({
               )}
           </nav>
 
-          <div className="flex items-center gap-3">
-            <h1 className="text-2xl font-bold text-foreground truncate">
-              {dagRun.name}
-            </h1>
-            {dagRun.sourceFileName && (
-              <I18nProps>
-                <a
-                  href={buildDAGPageURL({
-                    fileName: dagRun.sourceFileName,
-                    remoteNode,
-                  })}
-                  onClick={(e) => {
-                    e.preventDefault();
-                    navigate(
-                      buildDAGPageURL({
-                        fileName: dagRun.sourceFileName!,
-                        remoteNode,
-                      })
-                    );
-                  }}
-                  className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-all"
-                  title="View DAG Definition"
-                >
-                  <FileText className="h-3.5 w-3.5" />
-                  <span>
-                    <I18nText text={'Definition'} />
-                  </span>
-                </a>
-              </I18nProps>
-            )}
-            <I18nProps>
-              <button
-                type="button"
-                onClick={copyRunLink}
-                className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-all"
-                title={linkCopied ? 'Link copied' : 'Copy link to this run'}
-                aria-label={
-                  linkCopied ? 'Link copied' : 'Copy link to this run'
-                }
-              >
-                {linkCopied ? (
-                  <Check className="h-3.5 w-3.5 text-green-500" />
-                ) : (
-                  <Link2 className="h-3.5 w-3.5" />
-                )}
-                <span>
-                  {linkCopied ? (
-                    <I18nText text={'Copied'} />
-                  ) : (
-                    <I18nText text={'Copy link'} />
-                  )}
-                </span>
-              </button>
-            </I18nProps>
-            <span className="sr-only" aria-live="polite">
-              {linkCopied ? (
-                <I18nText text={'Run link copied to clipboard'} />
-              ) : (
-                ''
+          <div className="flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
+            <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+              <h1 className="min-w-0 break-all text-2xl font-semibold tracking-[-0.01em] text-foreground">
+                {dagRun.name}
+              </h1>
+              {dagRun.status != Status.NotStarted && dagRun.status && (
+                <StatusChip status={dagRun.status} size="md">
+                  {dagRun.statusLabel || ''}
+                </StatusChip>
               )}
-            </span>
+              <AutoRetryBadge
+                status={dagRun.status}
+                count={dagRun.autoRetryCount}
+                limit={dagRun.autoRetryLimit}
+              />
+            </div>
+            {dagRun.status != Status.NotStarted && (
+              <div className="flex shrink-0 items-center gap-2">
+                <RefreshButton onRefresh={refreshFn} />
+                <DAGRunActions
+                  dagRun={dagRun}
+                  name={dagRun.name}
+                  refresh={refreshFn}
+                  displayMode="full"
+                  hideUnavailable
+                  isRootLevel={dagRun.rootDAGRunId === dagRun.dagRunId}
+                />
+              </div>
+            )}
           </div>
         </div>
       </div>
 
-      {/* Status and metadata row */}
-      {dagRun.status != Status.NotStarted && (
-        <div className="flex flex-wrap items-center gap-2 lg:gap-6">
-          {/* Status, Refresh and actions */}
-          <div className="flex items-center gap-3">
-            {dagRun.status && (
-              <StatusChip status={dagRun.status} size="md">
-                {dagRun.statusLabel || ''}
-              </StatusChip>
-            )}
-            <AutoRetryBadge
-              status={dagRun.status}
-              count={dagRun.autoRetryCount}
-              limit={dagRun.autoRetryLimit}
-            />
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+        <RunMetaLine
+          dagRun={dagRun}
+          onCopyRunId={() => {
+            setLastCopy('runId');
+            void copyRunId(dagRun.dagRunId);
+          }}
+          runIdCopied={runIdCopied}
+        />
+        <div className="flex items-center gap-1 sm:ml-auto">
+          {dagRun.sourceFileName && (
             <I18nProps>
-              <button
-                onClick={handleRefresh}
-                disabled={isRefreshing}
-                className="relative group inline-flex items-center gap-1 px-2 py-1 text-xs font-medium rounded-md text-muted-foreground hover:text-foreground hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed transition-all"
-                title="Refresh (R)"
+              <a
+                href={buildDAGPageURL({
+                  fileName: dagRun.sourceFileName,
+                  remoteNode,
+                })}
+                onClick={(e) => {
+                  e.preventDefault();
+                  navigate(
+                    buildDAGPageURL({
+                      fileName: dagRun.sourceFileName!,
+                      remoteNode,
+                    })
+                  );
+                }}
+                className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                title="View workflow definition"
               >
-                <RefreshCw
-                  className={`h-3 w-3 ${isRefreshing ? 'animate-spin' : ''}`}
-                />
+                <FileText className="h-3.5 w-3.5" />
                 <span>
-                  <I18nText text={'Refresh'} />
+                  <I18nText text={'Definition'} />
                 </span>
-                <span className="absolute -bottom-1 -right-1 bg-muted text-muted-foreground text-xs font-medium px-1 rounded-sm border opacity-0 group-hover:opacity-100 transition-opacity">
-                  <I18nText text={'R'} />
-                </span>
-              </button>
+              </a>
             </I18nProps>
-            <DAGRunActions
-              dagRun={dagRun}
-              name={dagRun.name}
-              refresh={refreshFn}
-              displayMode="compact"
-              isRootLevel={dagRun.rootDAGRunId === dagRun.dagRunId}
-            />
-          </div>
-
-          {/* Metadata items */}
-          <div className="flex flex-wrap items-center gap-4 lg:gap-6 text-sm">
-            <div className="flex items-center gap-2 text-foreground bg-accent rounded-md px-3 py-1.5 border">
-              <Calendar className="h-4 w-4 text-muted-foreground" />
-              <span className="font-medium text-xs">
-                {dagRun?.startedAt
-                  ? `${dayjs(dagRun.startedAt).format('MMM D, HH:mm:ss')} ${dayjs(dagRun.startedAt).format('z')}`
-                  : '--'}
+          )}
+          <I18nProps>
+            <button
+              type="button"
+              onClick={copyRunLink}
+              className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              title={linkCopied ? 'Link copied' : 'Copy link to this run'}
+              aria-label={linkCopied ? 'Link copied' : 'Copy link to this run'}
+            >
+              {linkCopied ? (
+                <Check className="h-3.5 w-3.5 text-success" />
+              ) : (
+                <Link2 className="h-3.5 w-3.5" />
+              )}
+              <span>
+                {linkCopied ? (
+                  <I18nText text={'Copied'} />
+                ) : (
+                  <I18nText text={'Copy link'} />
+                )}
               </span>
-            </div>
-
-            <div className="flex items-center gap-2 text-foreground bg-accent rounded-md px-3 py-1.5 border">
-              <Timer className="h-4 w-4 text-muted-foreground" />
-              <span className="font-medium text-xs">
-                {getDurationDisplay(dagRun.startedAt, dagRun.finishedAt)}
-              </span>
-            </div>
-
-            {dagRun.workerId && (
-              <div className="flex items-center gap-2 text-foreground bg-accent rounded-md px-3 py-1.5 border">
-                <Server className="h-4 w-4 text-muted-foreground" />
-                <span className="font-medium text-xs font-mono">
-                  {dagRun.workerId}
-                </span>
-              </div>
+            </button>
+          </I18nProps>
+          <span className="sr-only" aria-live="polite">
+            {lastCopy === 'runId' && runIdCopied ? (
+              <I18nText text={'Run ID copied to clipboard'} />
+            ) : lastCopy === 'link' && linkCopied ? (
+              <I18nText text={'Run link copied to clipboard'} />
+            ) : (
+              ''
             )}
-
-            {dagRun.profileName && (
-              <div className="flex items-center gap-2 text-foreground bg-accent rounded-md px-3 py-1.5 border">
-                <SlidersHorizontal className="h-4 w-4 text-muted-foreground" />
-                <span className="font-medium text-xs font-mono">
-                  {dagRun.profileName}
-                </span>
-              </div>
-            )}
-
-            <div className="flex items-center gap-2 text-muted-foreground ml-auto">
-              <span className="font-medium text-xs text-muted-foreground uppercase tracking-wide">
-                <I18nText text={'Run ID'} />
-              </span>
-              <code className="bg-accent text-foreground px-3 py-1.5 rounded-md text-xs font-mono border">
-                {dagRun.dagRunId}
-              </code>
-            </div>
-          </div>
+          </span>
         </div>
-      )}
-
-      {/* Parameters - Show if present */}
-      {dagRun.params && (
-        <div className="mt-4 border-t border-border pt-4">
-          <div className="flex items-center gap-2 mb-2">
-            <Terminal className="h-4 w-4 text-muted-foreground" />
-            <span className="text-xs font-semibold text-foreground/90">
-              <I18nText text={'Parameters'} />
-            </span>
-          </div>
-          <div className="bg-accent rounded-md px-3 py-1.5 font-mono text-xs text-foreground max-h-[120px] overflow-y-auto border">
-            {dagRun.params}
-          </div>
-        </div>
-      )}
+      </div>
     </div>
   );
 };

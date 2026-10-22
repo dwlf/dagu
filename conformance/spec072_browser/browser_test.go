@@ -8,6 +8,7 @@ package spec072_browser_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -52,6 +53,49 @@ const signinPage = `<!doctype html><html><head><title>Sign in</title>
 
 const reportBody = "id,total\n1,10\n2,20\n"
 
+// receiptsPage sends the files its hidden file input gets to the server,
+// and says which arrived. Its button opens the file picker.
+const receiptsPage = `<!doctype html><html><head><title>Receipts</title></head><body>
+<h1>Receipts</h1>
+<input id="files" type="file" multiple hidden>
+<button onclick="document.getElementById('files').click()">Choose files</button>
+<p id="status">No files yet</p>
+<script>
+let uploads = 0;
+document.getElementById('files').addEventListener('change', async (event) => {
+  const form = new FormData();
+  for (const file of event.target.files) form.append('file', file);
+  const response = await fetch(location.pathname, {method: 'POST', body: form});
+  uploads++;
+  document.getElementById('status').textContent = 'Upload ' + uploads + ': ' + (await response.text());
+});
+</script>
+</body></html>`
+
+// layoutPage has a Save button. With ?banner=1 a Dismiss button comes
+// first, at the location Save had.
+const layoutPage = `<!doctype html><html><head><title>Draft</title></head><body>
+<p id="status">Draft</p>
+<div>%s<button onclick="document.getElementById('status').textContent='Saved'">Save</button></div>
+</body></html>`
+
+// agentPage says whether the user agent its request came with, given as a
+// JSON string, is the one its scripts see and names no headless browser,
+// and whether the screen holds the browser's window.
+const agentPage = `<!doctype html><html><head><title>Agent</title></head><body>
+<p id="agent"></p>
+<p id="screen"></p>
+<script>
+const sent = %s;
+document.getElementById('agent').textContent = sent === navigator.userAgent && !sent.includes('Headless')
+  ? 'user agent: headed' : 'user agent: ' + sent + ' / ' + navigator.userAgent;
+document.getElementById('screen').textContent = screen.width >= outerWidth && screen.height >= outerHeight
+  ? 'screen holds window' : 'screen ' + screen.width + 'x' + screen.height + ', window ' + outerWidth + 'x' + outerHeight;
+</script>
+</body></html>`
+
+const layoutBanner = `<button onclick="document.getElementById('status').textContent='Banner closed'">Dismiss</button>`
+
 // browserCommandTimeout bounds a command that starts a browser. Starting
 // one takes tens of seconds when the conformance job loads the runner.
 const browserCommandTimeout = 2 * time.Minute
@@ -65,6 +109,7 @@ var browserSlot = make(chan struct{}, 1)
 // runtime asks for.
 const (
 	kindAct       = "act"
+	kindObserve   = "observe"
 	kindStatement = "statement"
 	kindExtract   = "extract"
 	kindMetadata  = "metadata"
@@ -140,6 +185,15 @@ func (m *scriptedModel) serve(w http.ResponseWriter, r *http.Request) {
 
 	var kind, answer string
 	switch {
+	case strings.Contains(schema, `"elements"`):
+		kind = kindObserve
+		answer = `{"elements":[]}`
+		for _, button := range buttonPattern.FindAllStringSubmatch(page, -1) {
+			if strings.Contains(instruction, strings.TrimSpace(button[2])) {
+				answer = `{"elements":[{"elementId":"` + button[1] + `","description":"button","method":"click","arguments":[]}]}`
+				break
+			}
+		}
 	case strings.Contains(schema, "elementId"):
 		kind = kindAct
 		answer = `{"action":null,"twoStep":false}`
@@ -196,6 +250,44 @@ func startShop(t *testing.T) string {
 			_, _ = io.WriteString(w, signinPage)
 			return
 		}
+		if r.URL.Path == "/layout" {
+			banner := ""
+			if r.URL.Query().Get("banner") == "1" {
+				banner = layoutBanner
+			}
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = fmt.Fprintf(w, layoutPage, banner)
+			return
+		}
+		if r.URL.Path == "/guarded" {
+			// Cloudflare marks every answer that is one of its checks.
+			w.Header().Set("Content-Type", "text/html")
+			w.Header().Set("Cf-Mitigated", "challenge")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = io.WriteString(w, `<title>Just a moment...</title><p>Checking your browser</p>`)
+			return
+		}
+		if r.URL.Path == "/passing" {
+			if _, err := r.Cookie("passed"); err == nil {
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = io.WriteString(w, shopPage)
+				return
+			}
+			// A check that needs no person marks the browser and loads the
+			// page again.
+			w.Header().Set("Content-Type", "text/html")
+			w.Header().Set("Cf-Mitigated", "challenge")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = io.WriteString(w, `<title>Just a moment...</title><p>Checking your browser</p>
+<script>setTimeout(() => { document.cookie = "passed=1; path=/"; location.reload(); }, 1000);</script>`)
+			return
+		}
+		if r.URL.Path == "/agent" {
+			sent, _ := json.Marshal(r.UserAgent())
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = fmt.Fprintf(w, agentPage, sent)
+			return
+		}
 		if r.URL.Path == "/report.csv" {
 			w.Header().Set("Content-Type", "text/csv")
 			w.Header().Set("Content-Disposition", `attachment; filename="report.csv"`)
@@ -242,6 +334,60 @@ func requireChrome(t *testing.T) {
 		t.Fatal("Chrome is required in CI; set CHROME_PATH")
 	}
 	t.Skip("Chrome is not installed; set CHROME_PATH to run browser conformance tests")
+}
+
+// receivedFile is a file the receipts page sent.
+type receivedFile struct {
+	Name, Type, Content string
+}
+
+// receiptsServer serves the receipts page and keeps the files it sends.
+type receiptsServer struct {
+	mu       sync.Mutex
+	received [][]receivedFile
+}
+
+func startReceipts(t *testing.T) (*receiptsServer, string) {
+	t.Helper()
+	receipts := &receiptsServer{}
+	server := httptest.NewServer(http.HandlerFunc(receipts.serve))
+	t.Cleanup(server.Close)
+	return receipts, server.URL + "/receipts"
+}
+
+func (s *receiptsServer) serve(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, receiptsPage)
+		return
+	}
+	if err := r.ParseMultipartForm(1 << 20); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	var files []receivedFile
+	var names []string
+	for _, header := range r.MultipartForm.File["file"] {
+		file, err := header.Open()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		content, _ := io.ReadAll(file)
+		_ = file.Close()
+		files = append(files, receivedFile{Name: header.Filename, Type: header.Header.Get("Content-Type"), Content: string(content)})
+		names = append(names, header.Filename)
+	}
+	s.mu.Lock()
+	s.received = append(s.received, files)
+	s.mu.Unlock()
+	_, _ = io.WriteString(w, strings.Join(names, ", "))
+}
+
+func (s *receiptsServer) uploads() [][]receivedFile {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.received)
 }
 
 type browserEnv struct {
@@ -302,6 +448,39 @@ func TestBrowserDialogs(t *testing.T) {
 	require.Equal(t, 1, b.model.count(kindAct))
 }
 
+// A browser without a window sends the user agent the same browser sends
+// with one, learned on the first run and kept for the next, and reports a
+// screen that holds its window.
+func TestBrowserLooksHeaded(t *testing.T) {
+	t.Parallel()
+
+	b := newBrowserEnv(t)
+	for range 2 {
+		result := b.dagu.RunWithEnv(b.env, "start", "looks_headed.yaml")
+		result.ExpectExitCode(0)
+		result.ExpectStderrNotContains("warning:")
+	}
+}
+
+// A step that fails on a page the site answered with a bot check says so.
+func TestBrowserNamesBotCheck(t *testing.T) {
+	t.Parallel()
+
+	b := newBrowserEnv(t)
+	result := b.dagu.RunWithEnv(b.env, "start", "bot_check.yaml")
+	result.ExpectNonZeroExitCode()
+	result.ExpectStderrContains("answered with a Cloudflare bot check (HTTP 403) in place of the page")
+}
+
+// A bot check that passes on its own is waited out, so the step reads the
+// page it stood in for.
+func TestBrowserWaitsForBotCheckToPass(t *testing.T) {
+	t.Parallel()
+
+	b := newBrowserEnv(t)
+	b.dagu.RunWithEnv(b.env, "start", "bot_check_passes.yaml").ExpectExitCode(0)
+}
+
 // With the sandbox on, a browser step fails before starting a browser where
 // the browser runtime would turn the sandbox off, here because CI is set.
 func TestBrowserSandboxNotSilentlyOff(t *testing.T) {
@@ -339,6 +518,45 @@ func TestBrowserReplayCache(t *testing.T) {
 	require.Equal(t, 1, b.model.count(kindAct), "the replayed act makes no model request")
 }
 
+// A step under ai: never runs without a model: it fails while nothing is
+// recorded, and replays what a run of the step under on_miss recorded.
+func TestBrowserNeverReplaysWithoutModel(t *testing.T) {
+	t.Parallel()
+
+	b := newBrowserEnv(t)
+	env := append(b.env, "DAGU_HOME="+t.TempDir())
+	// The name makes never.yaml the click DAG, whose replay cache it reads.
+	missed := b.dagu.RunWithEnv(env, "start", "--name", "click", "never.yaml")
+	missed.ExpectNonZeroExitCode()
+	missed.ExpectStderrContains("the act cannot run without AI: there is no recording of it on this host")
+	require.Zero(t, b.model.total())
+
+	b.dagu.RunWithEnv(env, "start", "click.yaml").ExpectExitCode(0)
+	requests := b.model.total()
+	require.Equal(t, 1, b.model.count(kindAct))
+
+	b.dagu.RunWithEnv(env, "start", "--name", "click", "never.yaml").ExpectExitCode(0)
+	require.Equal(t, requests, b.model.total(), "the replay makes no model request")
+}
+
+// A replay acts only on the element it recorded. When the layout puts
+// another element at the recorded location, the act asks the model again
+// instead of clicking that element.
+func TestBrowserReplayHealsShiftedElement(t *testing.T) {
+	t.Parallel()
+
+	b := newBrowserEnv(t)
+	env := append(b.env, "DAGU_HOME="+t.TempDir())
+	b.dagu.RunWithEnv(env, "start", "layout.yaml").ExpectExitCode(0)
+	require.Equal(t, 1, b.model.count(kindAct))
+
+	b.dagu.RunWithEnv(env, "start", "layout.yaml", "--", "BANNER=1").ExpectExitCode(0)
+	require.Equal(t, 2, b.model.count(kindAct), "the act heals on the shifted page")
+
+	b.dagu.RunWithEnv(env, "start", "layout.yaml", "--", "BANNER=1").ExpectExitCode(0)
+	require.Equal(t, 2, b.model.count(kindAct), "the healed act replays")
+}
+
 // Clearing a step's cache, or removing all of the DAG's history, makes the
 // next run ask the model again.
 func TestBrowserReplayCacheClear(t *testing.T) {
@@ -358,6 +576,30 @@ func TestBrowserReplayCacheClear(t *testing.T) {
 	b.dagu.RunWithEnv(env, "rm", "--history", "--force", "click").ExpectExitCode(0)
 	b.dagu.RunWithEnv(env, "start", "click.yaml").ExpectExitCode(0)
 	require.Equal(t, 3, b.model.count(kindAct), "removing all history clears the cache")
+}
+
+// Files an earlier step lists reach the site through the file picker the
+// named button opens, and through the page's only file input without the
+// model. A second run uploads through the recorded button without the model.
+func TestBrowserUpload(t *testing.T) {
+	t.Parallel()
+
+	b := newBrowserEnv(t)
+	receipts, receiptsURL := startReceipts(t)
+	env := append(b.env, "RECEIPTS_URL="+receiptsURL, "DAGU_HOME="+t.TempDir())
+	b.dagu.RunWithEnv(env, "start", "upload.yaml").ExpectExitCode(0)
+
+	invoices := []receivedFile{
+		{Name: "a.pdf", Type: "application/pdf", Content: "invoice A"},
+		{Name: "b.pdf", Type: "application/pdf", Content: "invoice B"},
+	}
+	require.Equal(t, [][]receivedFile{invoices, invoices}, receipts.uploads())
+	require.Equal(t, 1, b.model.count(kindObserve))
+	require.Zero(t, b.model.count(kindAct))
+
+	b.dagu.RunWithEnv(env, "start", "upload.yaml").ExpectExitCode(0)
+	require.Len(t, receipts.uploads(), 4)
+	require.Equal(t, 1, b.model.count(kindObserve), "the recorded upload makes no model request")
 }
 
 func TestBrowserSecretInInstruction(t *testing.T) {
@@ -407,4 +649,14 @@ func TestBrowserValidation(t *testing.T) {
 			result.ExpectStderrContains(tc.message)
 		})
 	}
+}
+
+// A link field without format: uri gets the link's element id when the step
+// runs, so validate warns about it and still succeeds.
+func TestBrowserLinkFieldWarning(t *testing.T) {
+	t.Parallel()
+
+	result := harness.NewRunner(t).Run("validate", "link_field.yaml")
+	result.ExpectExitCode(0)
+	result.ExpectStderrContains("listings[].link", "has no format: uri")
 }

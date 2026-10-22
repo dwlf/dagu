@@ -3,7 +3,7 @@
 
 import { useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { components } from '../../../api/v1/schema';
+import { components, Stream } from '../../../api/v1/schema';
 import { AppBarContext } from '../../../contexts/AppBarContext';
 import { RemoteNodeProvider } from '../../../contexts/RemoteNodeContext';
 import { UnsavedChangesProvider } from '../../../contexts/UnsavedChangesContext';
@@ -22,7 +22,6 @@ import {
   useSSECacheSync,
 } from '../../../hooks/useSSECacheSync';
 import { useSubDAGRunSSE } from '../../../hooks/useSubDAGRunSSE';
-import dayjs from '../../../lib/dayjs';
 import {
   hasWorkspaceLabel,
   sanitizeWorkspaceName,
@@ -31,6 +30,16 @@ import {
   workspaceNameFromLabels,
 } from '../../../lib/workspace';
 import { I18nText } from '@/i18n/I18nText';
+import { I18nTemplate } from '@/i18n/I18nTemplate';
+import { useI18n } from '@/i18n/I18nProvider';
+import {
+  LoadErrorState,
+  NotFoundState,
+  PageLoading,
+} from '@/components/PageStates';
+import { MonitoringOffer } from '@/components/MonitoringOffer';
+import { isNotFoundQueryError } from '@/lib/queryErrors';
+import { buildDAGRunPageURL } from '@/features/dag-runs/lib/dagRunUrls';
 
 type Params = {
   fileName: string;
@@ -45,9 +54,14 @@ function DAGDetails() {
   const navigate = useNavigate();
   const appBarContext = useContext(AppBarContext);
   const [searchParams] = useSearchParams();
+  const { ts } = useI18n();
 
   const dagRunId = searchParams.get('dagRunId');
   const stepName = searchParams.get('step');
+  const logStream =
+    searchParams.get('stream') === Stream.stderr
+      ? Stream.stderr
+      : Stream.stdout;
   const subDAGRunId = searchParams.get('subDAGRunId');
   const queriedDAGRunName = searchParams.get('dagRunName');
   const queryRemoteNode = searchParams.get('remoteNode')?.trim();
@@ -74,26 +88,10 @@ function DAGDetails() {
   const fileName = params.fileName || '';
 
   const dagSSE = useDAGSSE(fileName, !!fileName, remoteNode);
+  const { setTitle } = appBarContext;
 
   // Determine active tab
   const tab = params.tab === 'docs' ? 'wiki' : params.tab || 'status';
-
-  // Format duration utility function
-  const formatDuration = useCallback(
-    (startDate: string, endDate: string): string => {
-      if (!startDate || !endDate) return '--';
-
-      const duration = dayjs.duration(dayjs(endDate).diff(dayjs(startDate)));
-      const hours = Math.floor(duration.asHours());
-      const minutes = duration.minutes();
-      const seconds = duration.seconds();
-
-      if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
-      if (minutes > 0) return `${minutes}m ${seconds}s`;
-      return `${seconds}s`;
-    },
-    []
-  );
 
   // Build URL with remote node parameter if needed
   const buildUrl = useCallback(
@@ -132,7 +130,11 @@ function DAGDetails() {
   }, [buildUrl, fileName, navigate, params.tab]);
 
   // Fetch DAG details — SWR is the single source of truth, refreshed by live invalidations
-  const { data: dagData, mutate: mutateDag } = useQuery(
+  const {
+    data: dagData,
+    error: dagError,
+    mutate: mutateDag,
+  } = useQuery(
     '/dags/{fileName}',
     {
       params: {
@@ -143,10 +145,34 @@ function DAGDetails() {
     sseFallbackOptions(dagSSE)
   );
   useSSECacheSync(dagSSE, mutateDag);
+  const dagTitle = dagData?.dag?.name || fileName;
+  useEffect(() => {
+    setTitle(dagTitle);
+  }, [dagTitle, setTitle]);
+
+  // A run is selected on the run page. Links that name a run on the
+  // workflow's Overview, from older versions or bookmarks, redirect there.
+  const runRootName = queriedDAGRunName || dagData?.dag?.name;
+  useEffect(() => {
+    if (tab !== 'status' || !dagRunId || !runRootName) return;
+    navigate(
+      buildDAGRunPageURL({
+        rootDAGRunName: runRootName,
+        rootDAGRunId: dagRunId,
+        subDAGRunId: subDAGRunId ?? undefined,
+        remoteNode,
+        step: stepName ?? undefined,
+      }),
+      { replace: true }
+    );
+  }, [dagRunId, navigate, remoteNode, runRootName, stepName, subDAGRunId, tab]);
+
   const dagLabels = [
     ...(dagData?.dag?.labels ?? []),
     ...(dagData?.dag?.tags ?? []),
   ];
+  // Scheduled runs happen unattended, which is when alerts matter.
+  const runsOnSchedule = !!dagData?.dag?.schedule?.length && !dagData.suspended;
   const dagWorkspaceName = workspaceNameFromLabels(dagLabels);
   const dagHasWorkspaceLabel = hasWorkspaceLabel(dagLabels);
   const dagMatchesWorkspace =
@@ -230,14 +256,17 @@ function DAGDetails() {
     DAGRunDetails | undefined
   >(undefined);
 
-  // Refresh all relevant data based on current view
-  const refreshData = useCallback(() => {
-    mutateDag();
-    if (subDAGRunId) {
-      mutateSubDagRun();
-    } else if (effectiveDAGRunId) {
-      mutateDagRun();
-    }
+  // Refresh all relevant data based on current view. The returned promise
+  // settles when the reads finish, so a refresh button can show progress.
+  const refreshData = useCallback(async () => {
+    await Promise.all([
+      mutateDag(),
+      subDAGRunId
+        ? mutateSubDagRun()
+        : effectiveDAGRunId
+          ? mutateDagRun()
+          : undefined,
+    ]);
   }, [
     mutateDag,
     mutateDagRun,
@@ -271,6 +300,32 @@ function DAGDetails() {
             }}
           >
             <div className="flex h-full min-h-0 w-full min-w-0 flex-col">
+              {!dagData?.dag &&
+                (dagError ? (
+                  isNotFoundQueryError(dagError) ? (
+                    <NotFoundState
+                      title={ts('Workflow not found')}
+                      description={
+                        <I18nTemplate
+                          text="No workflow named {name} exists. It may have been renamed or deleted."
+                          values={{ name: <code>{fileName}</code> }}
+                        />
+                      }
+                      action={{
+                        to: buildUrl('/dags'),
+                        label: ts('Back to Workflows'),
+                      }}
+                    />
+                  ) : (
+                    <LoadErrorState
+                      title={ts("Couldn't load this workflow")}
+                      error={dagError}
+                      onRetry={() => void mutateDag()}
+                    />
+                  )
+                ) : (
+                  <PageLoading />
+                ))}
               {dagData?.dag && dagMatchesWorkspace && (
                 <>
                   <DAGHeader
@@ -278,21 +333,23 @@ function DAGDetails() {
                     currentDAGRun={displayDAGRun}
                     fileName={fileName}
                     refreshFn={refreshData}
-                    formatDuration={formatDuration}
                     buildScopedUrl={buildUrl}
                     pinned={dagData.pinned}
                   />
+                  {tab === 'status' && runsOnSchedule && (
+                    <MonitoringOffer className="mt-3" />
+                  )}
                   <div className="min-h-0 flex-1">
                     <DAGDetailsContent
                       fileName={fileName}
                       dag={dagData.dag}
                       currentDAGRun={displayDAGRun}
                       refreshFn={refreshData}
-                      formatDuration={formatDuration}
                       activeTab={tab}
                       onTabChange={handleTabChange}
                       dagRunId={displayDAGRunId}
                       stepName={stepName}
+                      logStream={logStream}
                       isModal={false}
                       skipHeader={true}
                       localDags={dagData?.localDags}
@@ -306,7 +363,7 @@ function DAGDetails() {
               {dagData?.dag && !dagMatchesWorkspace && (
                 <div className="p-6 text-sm text-muted-foreground">
                   <I18nText
-                    text={'This DAG is not in the selected workspace.'}
+                    text={'This workflow is not in the selected workspace.'}
                   />
                 </div>
               )}

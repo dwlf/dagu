@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/dagucloud/dagu/v2/internal/browserhost"
+	"github.com/dagucloud/dagu/v2/internal/browserhost/certproxy"
 	cmnconfig "github.com/dagucloud/dagu/v2/internal/cmn/config"
 	"github.com/dagucloud/dagu/v2/internal/cmn/dirlock"
 	"github.com/dagucloud/dagu/v2/internal/cmn/masking"
@@ -89,11 +90,25 @@ type Sessions struct {
 	launcher    launcher
 	newProvider providerFactory
 	now         func() time.Time
+	// wait returns once d has passed on the clock now reads, or ctx ended.
+	wait func(ctx context.Context, d time.Duration) error
 }
 
 // NewSessions returns the browser sessions of this host.
 func NewSessions() *Sessions {
-	return &Sessions{launcher: stagehandLauncher{}, now: time.Now}
+	return &Sessions{launcher: stagehandLauncher{}, now: time.Now, wait: sleepContext}
+}
+
+// sleepContext returns once d has passed, or ctx ended.
+func sleepContext(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 // SessionOptions configures the browser a session opens.
@@ -134,9 +149,23 @@ type SessionPageView struct {
 	OutlineTruncated bool   `json:"outline_truncated,omitempty"`
 }
 
+// SessionRefusal is a site answering with a refusal or a bot check in place
+// of the page the browser asked for.
+type SessionRefusal struct {
+	Host   string `json:"host"`
+	Status int    `json:"status"`
+	// BotCheck names the check the site answered with, such as cloudflare.
+	BotCheck string `json:"bot_check,omitempty"`
+	// Message says what happened in a sentence.
+	Message string `json:"message"`
+}
+
 // OpenResult reports an opened session.
 type OpenResult struct {
 	ID string `json:"id"`
+	// TLSVerified confirms the proxy verified the final HTTPS page's host.
+	// False means no such evidence was available, not a certificate failure.
+	TLSVerified bool `json:"tls_verified"`
 	// CDPURL is the browser's DevTools address, where an application can
 	// show the page and let a person act on it.
 	CDPURL       string    `json:"cdp_url"`
@@ -145,6 +174,8 @@ type OpenResult struct {
 	Model        string    `json:"model,omitempty"`
 	IdleDeadline time.Time `json:"idle_deadline"`
 	Warnings     []string  `json:"warnings"`
+	// Refused is the refusal the page shows, if any.
+	Refused *SessionRefusal `json:"refused,omitempty"`
 	SessionPageView
 }
 
@@ -188,8 +219,10 @@ type DoResult struct {
 	Actions []SessionAction `json:"actions"`
 	// Act is the act a step writes for an element operation.
 	Act string `json:"act,omitempty"`
+	// Into is the into a step writes for an element upload.
+	Into string `json:"into,omitempty"`
 	// Recorded reports that a step exported from the session replays the
-	// act's actions.
+	// act's or the upload's actions.
 	Recorded bool           `json:"recorded"`
 	Outputs  map[string]any `json:"outputs,omitempty"`
 	// Screenshot is the file a screenshot operation saved.
@@ -201,6 +234,8 @@ type DoResult struct {
 	DurationMS   int64           `json:"duration_ms"`
 	Warnings     []string        `json:"warnings"`
 	IdleDeadline time.Time       `json:"idle_deadline"`
+	// Refused is the refusal the page shows after the operation, if any.
+	Refused *SessionRefusal `json:"refused,omitempty"`
 	SessionPageView
 }
 
@@ -227,6 +262,8 @@ type DescribeResult struct {
 	Screenshot   string    `json:"screenshot,omitempty"`
 	IdleDeadline time.Time `json:"idle_deadline"`
 	Warnings     []string  `json:"warnings"`
+	// Refused is the refusal the page shows, if any.
+	Refused *SessionRefusal `json:"refused,omitempty"`
 }
 
 // SessionSummary describes a session for a list.
@@ -282,6 +319,14 @@ func (s *Sessions) Open(ctx context.Context, opts SessionOptions) (OpenResult, e
 	sweepCtx, cancel := context.WithTimeout(ctx, sweepBudget)
 	_ = browserhost.SweepAll(sweepCtx, browserDir, s.now(), nil)
 	cancel()
+	certificates, warnings, err := loadClientCertificates(ctx, nil, "")
+	if err != nil {
+		return OpenResult{}, &SessionError{Code: CodeLaunchFailed, Message: err.Error()}
+	}
+	authorities, err := loadTrustedCAs(ctx)
+	if err != nil {
+		return OpenResult{}, &SessionError{Code: CodeLaunchFailed, Message: err.Error()}
+	}
 
 	id, workDir, err := reserveSession(store)
 	if err != nil {
@@ -322,6 +367,12 @@ func (s *Sessions) Open(ctx context.Context, opts SessionOptions) (OpenResult, e
 		AllowedDomains: opts.AllowedDomains,
 		NoSandbox:      cmnconfig.GetConfig(ctx).Browser.NoSandbox,
 		Generate:       generate,
+
+		ClientCertificates: certificates,
+		TrustedCAs:         authorities,
+		Guard:              guardsCertificates(ctx, certificates),
+		Warn:               func(message string) { warnings = append(warnings, message) },
+		BrowserDir:         browserDir,
 	}
 	if opts.Viewport != nil {
 		launch.Viewport = &viewport{Width: opts.Viewport.Width, Height: opts.Viewport.Height}
@@ -365,37 +416,43 @@ func (s *Sessions) Open(ctx context.Context, opts SessionOptions) (OpenResult, e
 		BrowserStartedAt: handle.BrowserStartedAt,
 		WorkDir:          workDir,
 	}
+	recordCertProxy(&record, handle.CertProxy)
 	if err := saveSessionRecord(store, &record, state, browserhost.StateRunning, time.Time{}); err != nil {
 		return OpenResult{}, errors.Join(err, closeSession(ctx, eng, store, record))
 	}
-	var warnings []string
 	if warning := jobWarning(); warning != "" {
 		warnings = append(warnings, warning)
 	}
 	op := s.operator(eng, bridge, state, nil, workDir, &warnings)
 	if opts.URL != "" {
 		if _, err := op.gotoURL(ctx, -1, opts.URL, defaultOperationTimeout); err != nil {
-			return OpenResult{}, errors.Join(&SessionError{Code: CodeOperationFailed, Message: "open " + opts.URL + ": " + err.Error()},
-				closeSession(ctx, eng, store, record))
+			message := "open " + opts.URL + ": " + err.Error()
+			if refused, ok := op.pageRefusal(ctx); ok {
+				message += "; " + refused.String()
+			}
+			return OpenResult{}, errors.Join(&SessionError{Code: CodeOperationFailed, Message: message}, closeSession(ctx, eng, store, record))
 		}
 	}
-	if err := op.checkPage(ctx); err != nil {
+	if err := op.checkPage(ctx, -1); err != nil {
 		return OpenResult{}, errors.Join(&SessionError{Code: CodeOperationFailed, Message: err.Error()}, closeSession(ctx, eng, store, record))
 	}
 	view, pageURL := s.view(ctx, eng, masker, opts.OutlineChars, &warnings)
-	state.Page = sessionPage{URL: pageURL, Title: view.Title}
+	refused := pageRefusal(ctx, op, sessionPage{}, pageURL)
+	state.Page = sessionPage{URL: pageURL, Title: view.Title, Refused: refused}
 	deadline := now.Add(idle)
 	if err := s.park(ctx, eng, store, &record, state, deadline); err != nil {
 		return OpenResult{}, err
 	}
 	return OpenResult{
 		ID:              id,
+		TLSVerified:     op.tlsVerified(ctx, pageURL),
 		CDPURL:          record.CDPURL,
 		Headless:        opts.Headless,
 		Profile:         opts.Profile,
 		Model:           state.modelLabel(),
 		IdleDeadline:    deadline,
 		Warnings:        nonNil(warnings),
+		Refused:         sessionRefusal(refused, masker),
 		SessionPageView: view,
 	}, nil
 }
@@ -498,6 +555,12 @@ func (s *Sessions) operator(eng engine, bridge *modelBridge, state sessionState,
 		warn: func(_ int, message string) {
 			*warnings = append(*warnings, message)
 		},
+		certificateProxy: eng.Handle().CertProxy != nil,
+		certificateEvent: func(_ int, event certproxy.Event) {
+			if event.Kind != certproxy.EventConnect {
+				*warnings = append(*warnings, "browser TLS: "+describeCertificateEvent(event))
+			}
+		},
 	}
 }
 
@@ -577,15 +640,15 @@ func (s *Sessions) Do(ctx context.Context, req DoRequest) (DoResult, error) {
 	if err != nil {
 		return DoResult{}, err
 	}
-	// An element operation is the act it stands for, with its action as the
-	// act's recording.
+	// An element operation is the act or upload it stands for, with its
+	// action as its recording.
 	var preset []recordedAction
 	if isElement {
 		snap, err := eng.Snapshot(ctx)
 		if err != nil {
 			return DoResult{}, &SessionError{Code: CodeOperationFailed, Message: "read the page: " + masker.MaskString(err.Error())}
 		}
-		instruction, action, err := elementAct(snap, element)
+		instruction, action, err := elementAct(snap, element, values.all)
 		if err != nil {
 			return DoResult{}, &SessionError{Code: CodeInvalidInput, Message: masker.MaskString(err.Error())}
 		}
@@ -607,9 +670,15 @@ func (s *Sessions) Do(ctx context.Context, req DoRequest) (DoResult, error) {
 	if state.Page.URL != "" && urlBefore != state.Page.URL {
 		warnings = append(warnings, fmt.Sprintf("the page changed since the last command, from %s to %s", state.Page.URL, urlBefore))
 	}
+	if op.Extract != nil {
+		warnings = append(warnings, extractWarnings(*op.Extract)...)
+	}
 	result := DoResult{ID: req.ID, Index: index, Kind: op.kind(), Status: OperationDone}
-	if isElement {
+	switch {
+	case isElement && op.Act != nil:
 		result.Act = op.Act.Instruction
+	case isElement && op.Upload != nil:
+		result.Into = op.Upload.Into
 	}
 	canonical, err := json.Marshal(op)
 	if err != nil {
@@ -636,7 +705,7 @@ func (s *Sessions) Do(ctx context.Context, req DoRequest) (DoResult, error) {
 		var done opResult
 		done, opErr = operator.runOperation(ctx, index, op)
 		if opErr == nil {
-			opErr = operator.checkPage(ctx)
+			opErr = operator.checkPage(ctx, index)
 		}
 		if opErr == nil {
 			result.Detail = done.Detail
@@ -644,11 +713,11 @@ func (s *Sessions) Do(ctx context.Context, req DoRequest) (DoResult, error) {
 				entry.URLBefore = done.PageURL
 			}
 			result.Actions = sessionActions(done.Actions, masker)
-			if op.Act != nil {
+			if op.Act != nil || op.Upload != nil {
 				entry.Recordable = done.PageURL != "" && len(done.Actions) > 0
 				if entry.Recordable && holdsValue(done.Actions, values.all) {
 					entry.Recordable = false
-					warnings = append(warnings, "the act's actions hold a variable's value, so an exported step asks the model for this act on every run")
+					warnings = append(warnings, "the operation's actions hold a variable's value, so an exported step asks the model for this operation on every run")
 				}
 				// Only actions an export replays are kept, and those hold no
 				// variable's value.
@@ -692,9 +761,24 @@ func (s *Sessions) Do(ctx context.Context, req DoRequest) (DoResult, error) {
 		}
 	}
 	view, pageURL := s.view(ctx, eng, masker, req.OutlineChars, &warnings)
+	// Reading a browser that stopped answering would only wait for it again,
+	// so a page still at the address last seen keeps the refusal seen there.
+	refused := state.Page.Refused
+	switch {
+	case !errors.Is(opErr, errBrowserUnresponsive):
+		refused = pageRefusal(ctx, operator, state.Page, pageURL)
+	case pageURL != state.Page.URL:
+		refused = nil
+	}
+	if refused != nil && result.Error != nil {
+		note := masker.MaskString(refused.String())
+		result.Error.Message += "; " + note
+		entry.Error += "; " + note
+	}
+	result.Refused = sessionRefusal(refused, masker)
 	entry.URLAfter = pageURL
 	state.Ops = append(state.Ops, entry)
-	state.Page = sessionPage{URL: pageURL, Title: view.Title}
+	state.Page = sessionPage{URL: pageURL, Title: view.Title, Refused: refused}
 	usage := bridge.totals()
 	state.Usage.Input += usage.Input
 	state.Usage.Output += usage.Output
@@ -777,7 +861,9 @@ func (s *Sessions) Describe(ctx context.Context, req DescribeRequest) (DescribeR
 			warnings = append(warnings, "screenshot: "+masker.MaskString(err.Error()))
 		}
 	}
-	state.Page = sessionPage{URL: snap.URL, Title: result.Title}
+	refused := pageRefusal(ctx, &operator{eng: eng, certificateProxy: eng.Handle().CertProxy != nil}, state.Page, snap.URL)
+	result.Refused = sessionRefusal(refused, masker)
+	state.Page = sessionPage{URL: snap.URL, Title: result.Title, Refused: refused}
 	result.IdleDeadline = s.now().Add(state.idleTimeout())
 	if err := use.park(ctx, state, result.IdleDeadline); err != nil {
 		return result, err
@@ -952,13 +1038,7 @@ func (s *Sessions) use(ctx context.Context, id string) (*sessionUse, error) {
 // attach reattaches to the session's browser for the command.
 func (u *sessionUse) attach(ctx context.Context, generate generateFunc) (engine, error) {
 	record := u.record
-	eng, err := u.sessions.launcher.Reattach(ctx, browserHandle{
-		CDPURL:           record.CDPURL,
-		ExtensionID:      record.ExtensionID,
-		ExtensionDir:     record.ExtensionDir,
-		BrowserPID:       record.BrowserPID,
-		BrowserStartedAt: record.BrowserStartedAt,
-	}, launchOptions{
+	eng, err := u.sessions.launcher.Reattach(ctx, recordedHandle(record), launchOptions{
 		DownloadsDir:   record.DownloadsDir,
 		AllowedDomains: u.state.Browser.AllowedDomains,
 		Generate:       generate,
@@ -1049,6 +1129,32 @@ func (s *Sessions) view(ctx context.Context, eng engine, masker *masking.Masker,
 	}, snap.URL
 }
 
+// pageRefusal returns the refusal the page at pageURL shows after a
+// command, with the bot check an earlier command saw on that page: a
+// browser reattached since cannot tell it, as when a person reloaded the
+// page between commands.
+func pageRefusal(ctx context.Context, op *operator, before sessionPage, pageURL string) *refusal {
+	refused, ok := op.pageRefusal(ctx)
+	if !ok {
+		return nil
+	}
+	if seen := before.Refused; refused.BotCheck == "" && seen != nil && before.URL == pageURL && seen.Host == refused.Host && seen.Status == refused.Status {
+		refused.BotCheck = seen.BotCheck
+	}
+	return &refused
+}
+
+// sessionRefusal reports refused in a command's result.
+func sessionRefusal(refused *refusal, masker *masking.Masker) *SessionRefusal {
+	if refused == nil {
+		return nil
+	}
+	return &SessionRefusal{
+		Host: masker.MaskString(refused.Host), Status: refused.Status, BotCheck: refused.BotCheck,
+		Message: masker.MaskString(refused.String()),
+	}
+}
+
 // closeSession closes a session whose opening failed.
 func closeSession(ctx context.Context, eng engine, store *browserhost.Store, record browserhost.Record) error {
 	closeErr := eng.Close(context.WithoutCancel(ctx))
@@ -1083,8 +1189,12 @@ func reserveSession(store *browserhost.Store) (string, string, error) {
 func sessionActions(actions []recordedAction, masker *masking.Masker) []SessionAction {
 	out := make([]SessionAction, 0, len(actions))
 	for _, action := range actions {
-		action.Arguments = maskAll(masker, slices.Clone(action.Arguments))
-		out = append(out, SessionAction(action))
+		out = append(out, SessionAction{
+			Selector:    action.Selector,
+			Description: action.Description,
+			Method:      action.Method,
+			Arguments:   maskAll(masker, slices.Clone(action.Arguments)),
+		})
 	}
 	return out
 }

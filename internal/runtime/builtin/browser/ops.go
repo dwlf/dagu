@@ -11,10 +11,12 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/dagucloud/dagu/v2/internal/browserhost"
+	"github.com/dagucloud/dagu/v2/internal/browserhost/certproxy"
 	cmnconfig "github.com/dagucloud/dagu/v2/internal/cmn/config"
 	"github.com/dagucloud/dagu/v2/internal/cmn/fileutil"
 	"github.com/dagucloud/dagu/v2/internal/cmn/masking"
@@ -78,6 +80,11 @@ type run struct {
 	// blockedUncounted is set once blocked requests can no longer be
 	// counted.
 	blockedUncounted bool
+	// certificateFailures holds, by host, the last trouble with a client
+	// certificate the proxy reported in this attempt.
+	certificateFailures map[string]string
+	// refused is the refusal reported last, while the page still shows it.
+	refused *refusal
 	// downloadWindow is the longest timeout of the acts and gotos run so
 	// far, which can start downloads; zero until one runs.
 	downloadWindow time.Duration
@@ -95,6 +102,7 @@ func newRun(ctx context.Context, e *browserExecutor) (*run, error) {
 		secrets = env.Scope.AllSecrets()
 		artifactsDir, _ = env.Scope.Get(runenv.EnvKeyDAGRunArtifactsDir)
 	}
+	secrets = withCertificatePassphrases(secrets, e.cfg.Browser.ClientCertificates)
 	if err := agentstep.CheckSecrets(executorType, e.cfg.operationTexts(), secrets); err != nil {
 		return nil, err
 	}
@@ -122,7 +130,9 @@ func newRun(ctx context.Context, e *browserExecutor) (*run, error) {
 			bridge:         bridge,
 			variables:      variables,
 			allowedDomains: e.cfg.Browser.AllowedDomains,
+			choice:         e.cfg.operationChoice,
 			shots:          artifacts,
+			workDir:        env.WorkingDir,
 		},
 		exec:      e,
 		cfg:       e.cfg,
@@ -138,14 +148,20 @@ func newRun(ctx context.Context, e *browserExecutor) (*run, error) {
 		answers:   map[string]string{},
 		outputs:   map[string]any{},
 		blocked:   map[string]int{},
+
+		certificateFailures: map[string]string{},
 	}
-	if e.cfg.cacheEnabled() {
-		r.cache = openReplayCache(browserDir, dagName, stepKey)
-		r.recorder = stepRecorder{cache: r.cache}
-	}
+	r.cache = openReplayCache(browserDir, dagName, stepKey)
+	r.recorder = stepRecorder{cache: r.cache}
 	r.timeline = &agentstep.Timeline{Log: e.stderr, Masker: masker, Total: len(e.cfg.Do), Update: e.updateSession, Provider: providerName}
 	r.warn = func(index int, message string) {
 		_, _ = fmt.Fprintf(r.timeline.Log, "warning: %s %s\n", r.timeline.Position(index), message)
+	}
+	r.certificateEvent = func(index int, event certproxy.Event) {
+		logCertificateEvent(r.timeline, index, event)
+		if certificateTrouble(event) {
+			r.certificateFailures[event.Host] = describeCertificateEvent(event)
+		}
 	}
 	return r, nil
 }
@@ -162,11 +178,12 @@ func (r *run) execute(ctx context.Context) error {
 	r.reportDialogs(-1)
 	r.reportBlocked(-1)
 	if err == nil {
-		err = r.checkPage(ctx)
+		err = r.checkPage(ctx, -1)
 	}
 	if err != nil {
 		return r.fail(ctx, -1, "", err)
 	}
+	r.reportRefusal(ctx, -1)
 	for i := start; i < len(r.cfg.Do); i++ {
 		op := r.cfg.Do[i]
 		if op.When != nil {
@@ -177,7 +194,7 @@ func (r *run) execute(ctx context.Context) error {
 			}
 			if !holds {
 				r.timeline.Operation(agentstep.Report{
-					Index: i, Kind: op.kind(), Subject: op.When.String(), Status: agentstep.StatusSkipped, Detail: reason,
+					Index: i, Kind: op.kind(), Subject: op.When.String(), Status: agentstep.StatusSkipped, Via: op.When.via(), Detail: reason,
 					Tokens: r.bridge.totals().sub(before).total(), Duration: time.Since(began),
 				})
 				continue
@@ -198,9 +215,10 @@ func (r *run) execute(ctx context.Context) error {
 		if err != nil {
 			return r.fail(ctx, i, op.kind(), err)
 		}
-		if err := r.checkPage(ctx); err != nil {
+		if err := r.checkPage(ctx, i); err != nil {
 			return r.fail(ctx, i, op.kind(), err)
 		}
+		r.reportRefusal(ctx, i)
 		if op.Act != nil || op.Goto != "" {
 			r.downloadWindow = max(r.downloadWindow, op.timeout())
 		}
@@ -247,6 +265,24 @@ func (r *run) reportBlocked(index int) {
 		r.blocked[host] += count
 	}
 	logBlocked(r.timeline, index, describeBlocked(blocked))
+}
+
+// reportRefusal records the refusal the page shows after the operation at
+// index, once while the page keeps showing it, and returns it.
+func (r *run) reportRefusal(ctx context.Context, index int) *refusal {
+	if r.eng == nil {
+		return nil
+	}
+	refused, ok := r.pageRefusal(ctx)
+	if !ok {
+		r.refused = nil
+		return nil
+	}
+	if r.refused == nil || *r.refused != refused {
+		r.refused = &refused
+		logRefusal(r.timeline, index, refused)
+	}
+	return &refused
 }
 
 // settleDownloads waits for downloads that are still running and records the
@@ -339,6 +375,7 @@ func (r *run) startSession(ctx context.Context) (int, error) {
 		BrowserPID:       handle.BrowserPID,
 		BrowserStartedAt: handle.BrowserStartedAt,
 	}
+	recordCertProxy(&r.record, handle.CertProxy)
 	if err := r.saveRunningRecord(); err != nil {
 		return 0, err
 	}
@@ -357,6 +394,19 @@ func (r *run) launchOptions(ctx context.Context, recordID string) (launchOptions
 	if err != nil {
 		return launchOptions{}, err
 	}
+	certificates, warnings, err := loadClientCertificates(ctx, r.cfg.Browser.ClientCertificates, runtime.GetEnv(ctx).WorkingDir)
+	if err != nil {
+		return launchOptions{}, err
+	}
+	authorities, err := loadTrustedCAs(ctx)
+	if err != nil {
+		return launchOptions{}, err
+	}
+	for _, warning := range warnings {
+		r.warn(-1, warning)
+	}
+	guard := guardsCertificates(ctx, certificates)
+	r.certificateProxy = len(certificates) > 0 || len(authorities) > 0 || guard
 	opts := launchOptions{
 		Executable:     r.cfg.Browser.Executable,
 		Headless:       r.cfg.headless(),
@@ -366,6 +416,12 @@ func (r *run) launchOptions(ctx context.Context, recordID string) (launchOptions
 		AllowedDomains: r.cfg.Browser.AllowedDomains,
 		NoSandbox:      cmnconfig.GetConfig(ctx).Browser.NoSandbox,
 		Generate:       r.bridge.generate,
+
+		ClientCertificates: certificates,
+		TrustedCAs:         authorities,
+		Guard:              guard,
+		Warn:               func(message string) { r.warn(-1, message) },
+		BrowserDir:         r.browser,
 	}
 	if name := r.cfg.Browser.Profile; name != "" {
 		lease, err := acquireProfile(ctx, r.browser, name, recordID, true)
@@ -449,10 +505,8 @@ func (r *run) succeed(ctx context.Context) error {
 	if err := r.shutdown(ctx); err != nil {
 		_, _ = fmt.Fprintf(r.timeline.Log, "warning: browser cleanup: %s\n", r.masker.MaskString(err.Error()))
 	}
-	if r.cache != nil {
-		if err := r.cache.Commit(ctx); err != nil {
-			_, _ = fmt.Fprintf(r.timeline.Log, "warning: keep replay recordings: %s\n", r.masker.MaskString(err.Error()))
-		}
+	if err := r.cache.Commit(ctx); err != nil {
+		_, _ = fmt.Fprintf(r.timeline.Log, "warning: keep replay recordings: %s\n", r.masker.MaskString(err.Error()))
 	}
 	usage := r.bridge.totals()
 	summary := fmt.Sprintf("Completed %d operations using %d tokens", len(r.cfg.Do), usage.total())
@@ -480,6 +534,13 @@ func (r *run) fail(ctx context.Context, index int, kind string, cause error) err
 		cause = ctx.Err()
 	}
 	r.reportBlocked(index)
+	r.takeCertificateEvents(ctx, index)
+	// A page the site refused explains a failure that follows, however long
+	// after the refusal.
+	var refused *refusal
+	if ctx.Err() == nil && !errors.Is(cause, errBrowserUnresponsive) {
+		refused = r.reportRefusal(ctx, index)
+	}
 	var files []string
 	if r.cfg.screenshotPolicy() != screenshotsNever && r.artifacts.Enabled() && r.eng != nil {
 		if rel, err := r.capture(context.WithoutCancel(ctx), failureShotLabel); err == nil {
@@ -487,15 +548,25 @@ func (r *run) fail(ctx context.Context, index int, kind string, cause error) err
 		}
 	}
 	_ = r.shutdown(ctx)
-	r.forgetReplays(ctx, index, kind, cause)
+	r.forgetReplays(ctx, index, kind, cause, refused != nil)
 	message := r.masker.MaskString(cause.Error())
 	if index >= 0 {
 		message = fmt.Sprintf("do[%d] %s failed: %s", index, kind, message)
+	}
+	if refused != nil {
+		if note := r.masker.MaskString(refused.String()); !strings.Contains(message, note) {
+			message += "; " + note
+		}
 	}
 	// A blocked request often breaks the page long before an operation
 	// fails, so the failure summarizes every request blocked in the attempt.
 	if len(r.blocked) > 0 {
 		message += "; browser.allowed_domains blocked " + r.masker.MaskString(describeBlocked(r.blocked))
+	}
+	for _, host := range slices.Sorted(maps.Keys(r.certificateFailures)) {
+		if failure := r.masker.MaskString(r.certificateFailures[host]); !strings.Contains(message, failure) {
+			message += "; browser TLS: " + failure
+		}
 	}
 	usage := r.bridge.totals()
 	r.timeline.AppendEvent(ir.AgentSessionEvent{Type: agentstep.EventLifecycle, Status: agentstep.StatusFailed, Content: message, Files: files})
@@ -511,13 +582,14 @@ func (r *run) fail(ctx context.Context, index int, kind string, cause error) err
 // failed on the page may have followed a replay that did the wrong thing, so
 // the recordings the step replayed are dropped. A failure of the model, the
 // browser, a download, an ask, or the run itself says nothing about them,
-// so they stay. What the step recorded is never kept.
-func (r *run) forgetReplays(ctx context.Context, index int, kind string, cause error) {
-	if r.cache == nil {
-		return
-	}
-	if index < 0 || ctx.Err() != nil || kind == opAsk || kind == kindDownload ||
-		errors.Is(cause, errBrowserUnresponsive) || errors.Is(cause, errPageSessionLost) || r.bridge.failedRequest() {
+// so they stay, as they do when the site refused the page. So does a replay
+// that stopped because it no longer fit the page under ai: never: the
+// recording is what a run under ai: on_miss repairs. What the step recorded
+// is never kept.
+func (r *run) forgetReplays(ctx context.Context, index int, kind string, cause error, refused bool) {
+	if index < 0 || ctx.Err() != nil || refused || kind == opAsk || kind == kindDownload ||
+		errors.Is(cause, errBrowserUnresponsive) || errors.Is(cause, errPageSessionLost) || r.bridge.failedRequest() ||
+		errors.As(cause, new(replayMiss)) {
 		r.cache.Discard()
 		return
 	}

@@ -111,7 +111,29 @@ type OpenCodeDef struct {
 
 // BrowserDef configures the browsers that browser steps start on this host.
 type BrowserDef struct {
-	Sandbox *bool `mapstructure:"sandbox"`
+	Sandbox                 *bool                         `mapstructure:"sandbox"`
+	ClientCertificates      []BrowserClientCertificateDef `mapstructure:"client_certificates"`
+	TrustedCAs              []BrowserTrustedCADef         `mapstructure:"trusted_cas"`
+	GuardClientCertificates *bool                         `mapstructure:"guard_client_certificates"`
+}
+
+// BrowserClientCertificateDef is a TLS client certificate that browsers on
+// this host present to the hosts it names.
+type BrowserClientCertificateDef struct {
+	Hosts          []string `mapstructure:"hosts"`
+	PFXFile        string   `mapstructure:"pfx_file"`
+	CertFile       string   `mapstructure:"cert_file"`
+	KeyFile        string   `mapstructure:"key_file"`
+	CAFile         string   `mapstructure:"ca_file"`
+	Passphrase     string   `mapstructure:"passphrase"`
+	PassphraseFile string   `mapstructure:"passphrase_file"`
+}
+
+// BrowserTrustedCADef is a server certificate authority that browsers on
+// this host trust for the hosts it names.
+type BrowserTrustedCADef struct {
+	Hosts  []string `mapstructure:"hosts"`
+	CAFile string   `mapstructure:"ca_file"`
 }
 
 // DAGDiscoveryDef configures DAG definition discovery.
@@ -379,6 +401,9 @@ type CoordinatorDef struct {
 	Advertise  string `mapstructure:"advertise"` // Auto-detected if empty
 	Port       int    `mapstructure:"port"`
 	HealthPort int    `mapstructure:"health_port"`
+	// WorkerWaitTimeout is a duration string such as "2m". Default: 2m; "0"
+	// refuses a dispatch with no healthy matching worker at once.
+	WorkerWaitTimeout string `mapstructure:"worker_wait_timeout"`
 }
 
 // WorkerDef configures the worker.

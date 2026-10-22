@@ -35,6 +35,7 @@ import (
 	persisfile "github.com/dagucloud/dagu/v2/internal/persis/file"
 	"github.com/dagucloud/dagu/v2/internal/proc"
 	"github.com/dagucloud/dagu/v2/internal/profile"
+	"github.com/dagucloud/dagu/v2/internal/publicwebhook"
 	queuedomain "github.com/dagucloud/dagu/v2/internal/queue"
 	"github.com/dagucloud/dagu/v2/internal/runtime"
 	"github.com/dagucloud/dagu/v2/internal/schedulerstate"
@@ -78,6 +79,7 @@ type Scheduler struct {
 	healthServer        *HealthServer // Health check server for monitoring
 	serviceRegistry     serviceregistry.ServiceRegistry
 	disableHealthServer bool            // Disable health server when running from start-all
+	disableSignals      bool            // Leave OS signals to start-all
 	zombieDetector      *ZombieDetector // Zombie DAG run detector
 	instanceID          string          // Unique instance identifier for service registry
 	queueProcessor      *QueueProcessor // Processor for queued DAG runs
@@ -93,6 +95,7 @@ type Scheduler struct {
 	eventCollector      func(context.Context)
 	notificationMonitor *chatbridge.NotificationMonitor
 	incidentMonitor     *chatbridge.NotificationMonitor
+	publicWebhooks      *publicwebhook.Service
 }
 
 type schedulerHooks struct {
@@ -126,6 +129,11 @@ type Dependencies struct {
 	IncidentState        chatbridge.StateStore
 	NewIncidentLease     func() chatbridge.Lease
 	LicenseManager       *license.Manager
+	// Webhooks, PublicWebhookStore, and CloudCredentials enable public
+	// webhook URLs; the feature is off unless all are set.
+	Webhooks           publicwebhook.Webhooks
+	PublicWebhookStore publicwebhook.Store
+	CloudCredentials   func() (license.CloudCredentials, bool)
 }
 
 type startupState struct {
@@ -167,6 +175,7 @@ func New(cfg *config.Config, deps Dependencies) (*Scheduler, error) {
 		scheduler.notificationMonitor = newNotificationMonitor(cfg, deps)
 		scheduler.incidentMonitor = newIncidentMonitor(cfg, deps)
 	}
+	scheduler.publicWebhooks = newPublicWebhooks(cfg, deps, scheduler)
 	scheduler.queueProcessor.dagRunLeaseStore = deps.DAGRunLeaseStore
 	scheduler.queueProcessor.dispatchTaskStore = deps.DispatchTaskStore
 	scheduler.queueProcessor.dispatchAdmissionStore = dispatchAdmissionStoreFromTaskStore(deps.DispatchTaskStore)
@@ -393,6 +402,12 @@ func (s *Scheduler) SetDispatchFunc(fn DispatchFunc) {
 // DisableHealthServer disables the health check server (used when running from start-all)
 func (s *Scheduler) DisableHealthServer() {
 	s.disableHealthServer = true
+}
+
+// DisableSignalHandling leaves OS signals to the hosting process, which stops
+// the scheduler through its context and Stop instead.
+func (s *Scheduler) DisableSignalHandling() {
+	s.disableSignals = true
 }
 
 // SetOpenCodeHost enables the process-owned managed OpenCode service.
@@ -635,8 +650,10 @@ func (s *Scheduler) Start(ctx context.Context) error {
 	s.queueProcessor.Start(ctx, notifyCh)
 	state.queueProcessorStarted = true
 
-	signal.Notify(sig, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
-	defer signal.Stop(sig)
+	if !s.disableSignals {
+		signal.Notify(sig, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
+		defer signal.Stop(sig)
+	}
 
 	if err := s.entryReader.Init(ctx); err != nil {
 		logger.Error(ctx, "Failed to initialize entry reader", tag.Error(err))
@@ -673,6 +690,10 @@ func (s *Scheduler) Start(ctx context.Context) error {
 
 	wg.Go(func() {
 		s.startIncidentMonitor(ctx)
+	})
+
+	wg.Go(func() {
+		s.startPublicWebhooks(ctx)
 	})
 
 	wg.Go(func() {
@@ -763,6 +784,13 @@ func (s *Scheduler) startIncidentMonitor(ctx context.Context) {
 		return
 	}
 	s.incidentMonitor.Run(ctx)
+}
+
+func (s *Scheduler) startPublicWebhooks(ctx context.Context) {
+	if s.publicWebhooks == nil {
+		return
+	}
+	s.publicWebhooks.Run(ctx)
 }
 
 func (s *Scheduler) startHeartbeat(ctx context.Context) {

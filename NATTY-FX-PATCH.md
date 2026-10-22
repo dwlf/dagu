@@ -5,13 +5,13 @@ single instance that serves `git land-approve` in `~/p/natty-fx`: the Cockpit
 column order and labels, and closing the live-update stream in hidden tabs.
 Everything else tracks upstream unchanged.
 
-Upstream base: **v2.19.0**, exact commit
-`2493ea5c5b6dc036a09ba38de704ec9a47589527`. Upgrade candidate branch:
-**`feat/dagu-v2.19.0-nfx`**. Both patches remain necessary: upstream has neither
+Upstream base: **v2.21.0**, exact commit
+`073ffa9a23e31c1c1cb3b8dd26b70ea0e334ed60`. Upgrade candidate branch:
+**`feat/dagu-v2.21.0-nfx`**. Both patches remain necessary: upstream has neither
 these Cockpit labels/order nor visibility handling in `SSEManager`.
 
-Patched builds identify themselves with **v2.19.0-nfx1**. Pass
-`BUILD_VERSION=v2.19.0-nfx1` to `make bin`; its existing linker setting embeds
+Patched builds identify themselves with **v2.21.0-nfx1**. Pass
+`BUILD_VERSION=v2.21.0-nfx1` to `make bin`; its existing linker setting embeds
 that value. This candidate does not rewrite existing tags or the shared
 `natty-fx` branch. The default Makefile value still comes from `git describe`.
 
@@ -129,7 +129,7 @@ Carry the two behavior files, their regression tests and this guide; inspect
 upstream first and remove a patch only when its equivalent exists there.
 Never rewrite shared branches or existing tags.
 
-The v2.19.0 release declares **Go 1.27.0** in `go.mod` and
+The v2.21.0 release declares **Go 1.27.2** in `go.mod` and
 **pnpm 10.13.1** (including its integrity pin) in `ui/package.json`.
 Use those versions so the lockfile and Go dependencies keep their declared
 build environment. The following commands prepare this candidate's embedded
@@ -139,14 +139,15 @@ UI and distinctly marked binary:
 (cd ui && npx --yes pnpm@10.13.1 install --frozen-lockfile --ignore-scripts)
 (cd ui && npx --yes pnpm@10.13.1 build)
 make cp-assets
-GOTOOLCHAIN=go1.27.0 make bin BUILD_VERSION=v2.19.0-nfx1
+GOTOOLCHAIN=go1.27.2 make bin BUILD_VERSION=v2.21.0-nfx1
 ```
 
 Run the focused regressions against unpatched release behavior first, then
 against both carried patches. The saved-view editor tests also assert the
 Submitted-first default order when creating or restoring columns. Keep the failing and passing output with the
 candidate's build and isolated-browser evidence under `.local/artifacts/`.
-Use a separate runtime directory and unused loopback port. Verify Cockpit
+Use Node 22 for the UI tools and a separate runtime directory on an unused
+loopback port. Browser verification uses Microsoft Edge. Verify Cockpit
 labels/order and that hiding a tab closes its stream; after another client
 changes its subscribed data, showing it must immediately receive the current
 snapshot without `lastEventId`. Candidate preparation does not install the
@@ -157,7 +158,7 @@ builds ~90s; a cold full build ~4 min. Candidate timing varies with cache state.
 
 Verify before pointing the service at it — the built binary should carry the
 patched strings and the new marker, and the Cockpit page at
-`http://127.0.0.1:32919/cockpit` should read its columns left to right as
+`http://127.0.0.1:32923/cockpit` should read its columns left to right as
 `SUBMITTED | QUEUED | RUNNING | LANDED | FAILED`:
 
 ```sh
