@@ -13,8 +13,9 @@ these Cockpit labels/order nor visibility handling in `SSEManager`.
 
 Patched builds identify themselves with **v2.21.0-nfx1**. Pass
 `BUILD_VERSION=v2.21.0-nfx1` to `make bin`; its existing linker setting embeds
-that value. This candidate does not rewrite existing tags or the shared
-`natty-fx` branch. The default Makefile value still comes from `git describe`.
+that value. This candidate does not rewrite existing tags or the fork's
+`main` branch, which carries the fork lineage (formerly `natty-fx`). The
+default Makefile value still comes from `git describe`.
 
 ## Patch 1: Cockpit column order and labels
 
