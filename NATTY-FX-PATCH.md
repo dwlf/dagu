@@ -1,8 +1,9 @@
 # natty-fx patch
 
-This fork exists to carry two small patches against upstream dagu, for the
+This fork exists to carry three small patches against upstream dagu, for the
 single instance that serves `git land-approve` in `~/p/natty-fx`: the Cockpit
-column order and labels, and closing the live-update stream in hidden tabs.
+column order and labels, closing the live-update stream in hidden tabs, and
+showing each run's product in the runs table.
 Everything else tracks upstream unchanged.
 
 Upstream base: **v2.21.0**, exact commit
@@ -62,6 +63,19 @@ It is an upstream candidate rather than a natty-fx preference: nothing in
 it is specific to this workflow. Drop it at the rebase that brings an
 upstream equivalent. `ui/src/hooks/__tests__/SSEManager.test.ts` ("page
 visibility") fails if the behaviour goes missing.
+
+## Patch 3: product and issue in the runs table
+
+Two files: `ui/src/features/dag-runs/components/dag-run-list/DAGRunTable.tsx`
+and `ui/src/i18n/staticMessages.ts` (one `Product` entry per locale). One
+shared service runs lands for several products, and the runs table showed
+no product. Board-land runs already carry `workspace=` and `issue=` labels,
+and the API returns `workspace` and `labels` on each run summary; the table
+now shows a Product column (workspace, with the `issue=` value beneath)
+whenever a listed run has either. No API or backend change.
+
+It is local to this workflow's labels. Drop it if upstream renders run
+labels in the table. Tracked as DAGU-xz79.
 
 ## Why patch 1 is a patch and not configuration
 
