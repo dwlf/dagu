@@ -39,6 +39,12 @@ interface DAGRunTableProps {
   onToggleBulkSelect?: (dagRun: DAGRunSelectionItem) => void;
 }
 
+// natty-fx: board-land submitters record the tracker issue as an `issue=` run label.
+function runIssue(dagRun: components['schemas']['DAGRunSummary']): string {
+  const label = dagRun.labels?.find((value) => value.startsWith('issue='));
+  return label ? label.slice('issue='.length) : '';
+}
+
 function isInteractiveEventTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) {
     return false;
@@ -273,6 +279,9 @@ function DAGRunTable({
   const showProfileColumn = dagRuns.some((dagRun) =>
     Boolean(dagRun.profileName)
   );
+  const showProductColumn = dagRuns.some(
+    (dagRun) => Boolean(dagRun.workspace) || Boolean(runIssue(dagRun))
+  );
   const isBulkSelected = (dagRun: DAGRunSelectionItem) =>
     selectedRunKeys?.has(getDAGRunSelectionKey(dagRun)) ?? false;
 
@@ -474,6 +483,7 @@ function DAGRunTable({
               <TableHead className="w-10"><I18nText text={"Select"} /></TableHead>
             )}
             <TableHead><I18nText text={"Workflow name"} /></TableHead>
+            {showProductColumn && <TableHead><I18nText text={"Product"} /></TableHead>}
             <TableHead><I18nText text={"Run ID"} /></TableHead>
             <TableHead><I18nText text={"Status"} /></TableHead>
             <TableHead><I18nText text={"Trigger"} /></TableHead>
@@ -579,6 +589,16 @@ function DAGRunTable({
                   )}
                 </div>
               </TableCell>
+              {showProductColumn && (
+                <TableCell className="py-1 px-2 whitespace-nowrap">
+                  <div>{dagRun.workspace || '-'}</div>
+                  {runIssue(dagRun) && (
+                    <div className="font-mono text-xs text-muted-foreground">
+                      {runIssue(dagRun)}
+                    </div>
+                  )}
+                </TableCell>
+              )}
               <TableCell className="py-1 px-2 font-mono text-muted-foreground">
                 {dagRun.dagRunId}
               </TableCell>
