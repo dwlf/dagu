@@ -26,6 +26,7 @@ import (
 	"github.com/dagucloud/dagu/v2/internal/service/scheduler"
 	"github.com/dagucloud/dagu/v2/internal/spec"
 	"github.com/dagucloud/dagu/v2/internal/test"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -111,7 +112,7 @@ steps:
     run: echo queued catchup
 `)
 
-		runID := "queued-catchup-run"
+		runID := uuid.NewString()
 		attempt, err := th.DAGRunRepository.CreateAttempt(th.Context, dagFile.DAG, time.Now(), runID, persis.DAGRunCreateAttemptOptions{})
 		require.NoError(t, err)
 
@@ -153,7 +154,7 @@ steps:
     run: echo queued retry
 `)
 
-		runID := "queued-retry-run"
+		runID := uuid.NewString()
 		attempt, err := th.DAGRunRepository.CreateAttempt(th.Context, dagFile.DAG, time.Now(), runID, persis.DAGRunCreateAttemptOptions{})
 		require.NoError(t, err)
 		logPath := filepath.Join(th.Config.Paths.LogDir, "queued-retry-test.log")
@@ -203,7 +204,7 @@ steps:
     run: echo queued retry
 `)
 
-		runID := "queued-retry-live-source-run"
+		runID := uuid.NewString()
 		startedAt := time.Now().Add(-time.Minute)
 		attempt, err := th.DAGRunRepository.CreateAttempt(th.Context, dagFile.DAG, startedAt, runID, persis.DAGRunCreateAttemptOptions{})
 		require.NoError(t, err)
@@ -278,7 +279,7 @@ steps:
 		require.NoError(t, os.MkdirAll(templateDir, 0o750))
 		require.NoError(t, os.WriteFile(filepath.Join(templateDir, "input.txt"), []byte("queued dispatch"), 0o600))
 
-		runID := "queue-dispatch-run"
+		runID := uuid.NewString()
 		queuedDAG := dagFile.Clone()
 		queuedDAG.Location = ""
 		attempt, err := th.DAGRunRepository.CreateAttempt(th.Context, queuedDAG, time.Now(), runID, persis.DAGRunCreateAttemptOptions{})
@@ -321,7 +322,7 @@ steps:
     run: echo queued retry dispatch
 `)
 
-		runID := "queue-dispatch-retry-run"
+		runID := uuid.NewString()
 		attempt, err := th.DAGRunRepository.CreateAttempt(th.Context, dagFile.DAG, time.Now(), runID, persis.DAGRunCreateAttemptOptions{})
 		require.NoError(t, err)
 		logPath := filepath.Join(th.Config.Paths.LogDir, "queue-dispatch-retry-test.log")
@@ -363,22 +364,23 @@ steps:
     run: echo retry root
 `)
 
+		runID := uuid.NewString()
 		th.RunCommand(t, cmd.Start(), test.CmdTest{
-			Args: []string{"start", "--run-id=root-same-run", dagFile.Location},
+			Args: []string{"start", "--run-id=" + runID, dagFile.Location},
 		})
 
 		th.RunCommand(t, cmd.Retry(), test.CmdTest{
 			Args: []string{
 				"retry",
-				"--run-id=root-same-run",
-				"--root=" + dagFile.Name + ":root-same-run",
+				"--run-id=" + runID,
+				"--root=" + dagFile.Name + ":" + runID,
 				dagFile.Location,
 			},
 		})
 
 		latestAttempt, err := th.DAGRunRepository.FindAttempt(
 			th.Context,
-			ir.NewDAGRunRef(dagFile.Name, "root-same-run"),
+			ir.NewDAGRunRef(dagFile.Name, runID),
 		)
 		require.NoError(t, err)
 
@@ -415,7 +417,7 @@ steps:
       shell: %s
 `, workDir, command, shell))
 
-		runID := "retry-working-dir-run"
+		runID := uuid.NewString()
 		err := th.RunCommandWithError(t, cmd.Start(), test.CmdTest{
 			Args: []string{"start", "--run-id", runID, dagFile.Location},
 		})
@@ -550,7 +552,7 @@ steps:
 		require.NoError(t, err)
 		require.Empty(t, metadataOnly.Secrets)
 
-		runID := "queued-catchup-secret-run"
+		runID := uuid.NewString()
 		scheduleTime := time.Date(2026, 2, 7, 12, 0, 0, 0, time.UTC)
 		require.NoError(t, scheduler.EnqueueCatchupRun(
 			th.Context,
