@@ -1452,7 +1452,8 @@ func (a *API) ensureDAGRunIDUnique(ctx context.Context, dag *ir.DAG, dagRunID st
 	if dagRunID == "" {
 		return fmt.Errorf("dagRunID must be non-empty")
 	}
-	if _, err := a.dagRunRepository.FindAttempt(ctx, ir.NewDAGRunRef(dag.Name, dagRunID)); err == nil {
+	_, err := a.dagRunRepository.FindAttempt(ctx, ir.NewDAGRunRef(dag.Name, dagRunID))
+	if err == nil || errors.Is(err, dagrun.ErrNoStatusData) {
 		return &Error{
 			HTTPStatus: http.StatusConflict,
 			Code:       api.ErrorCodeAlreadyExists,
@@ -1972,6 +1973,14 @@ func (a *API) enqueueDAGRun(ctx context.Context, dag *ir.DAG, req enqueueRequest
 
 	spec := a.subCmdBuilder.Enqueue(dag, opts)
 	if err := launcher.Run(ctx, spec); err != nil {
+		// A concurrent request with the same ID can win the persistence lock
+		// after this request's pre-check; the subprocess then fails on the
+		// duplicate. Report that as the documented conflict.
+		var conflict *Error
+		if errors.As(a.ensureDAGRunIDUnique(ctx, dag, dagRunID), &conflict) &&
+			conflict.HTTPStatus == http.StatusConflict {
+			return conflict
+		}
 		return fmt.Errorf("error enqueuing DAG: %w", err)
 	}
 

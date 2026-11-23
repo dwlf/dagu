@@ -2292,3 +2292,25 @@ steps:
 	require.NotNil(t, notice.Class)
 	require.Equal(t, api.ValueReferenceNoticeClassRuntimeOnly, *notice.Class)
 }
+
+// The named enqueue endpoint has no pre-check, so a duplicate ID reaches the
+// enqueue subprocess and fails there, the same path a concurrent loser takes.
+func TestEnqueueDAGDuplicateRunIDConflicts(t *testing.T) {
+	server := test.SetupServer(t)
+	spec := `
+steps:
+  - name: sleep
+    run: sleep 10
+`
+	_ = server.Client().Post("/api/v1/dags", api.CreateNewDAGJSONRequestBody{
+		Name: "dup_enqueue_dag",
+		Spec: &spec,
+	}).ExpectStatus(http.StatusCreated).Send(t)
+
+	runID := "dup-enqueue-run"
+	body := api.EnqueueDAGDAGRunJSONRequestBody{DagRunId: &runID}
+	_ = server.Client().Post("/api/v1/dags/dup_enqueue_dag/enqueue", body).
+		ExpectStatus(http.StatusOK).Send(t)
+	_ = server.Client().Post("/api/v1/dags/dup_enqueue_dag/enqueue", body).
+		ExpectStatus(http.StatusConflict).Send(t)
+}
